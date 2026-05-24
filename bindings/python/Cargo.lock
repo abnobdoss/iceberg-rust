@@ -4202,13 +4202,11 @@ name = "pyiceberg_core_rust"
 version = "0.9.0"
 dependencies = [
  "arrow",
- "bytes",
  "datafusion-ffi",
  "iceberg",
  "iceberg-datafusion",
  "iceberg-storage-opendal",
  "pyo3",
- "serde_json",
  "tokio",
 ]
 

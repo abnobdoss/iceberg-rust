@@ -18,7 +18,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use bytes::Bytes;
 use iceberg::io::{FileIO, FileIOBuilder, InputFile, OutputFile};
 use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
 use pyo3::exceptions::PyIOError;
@@ -27,7 +26,6 @@ use pyo3::types::PyDict;
 
 use crate::runtime::runtime;
 
-/// Keys whose values must be redacted in __repr__ to avoid leaking credentials.
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_lowercase();
     lower.contains("secret")
@@ -42,47 +40,33 @@ fn is_sensitive_key(key: &str) -> bool {
 #[derive(Clone)]
 pub struct PyFileIO {
     inner: FileIO,
-    /// A copy of the original props used at construction, for __repr__.
     props: HashMap<String, String>,
 }
 
 #[pymethods]
 impl PyFileIO {
-    /// Construct a `FileIO` handle from a dict of storage properties.
-    ///
-    /// The property keys are the same ones iceberg-rust's `FileIOBuilder` recognizes
-    /// (e.g. `s3.region`, `s3.access-key-id`).  For local-filesystem paths use
-    /// `file://…` URIs with an empty dict.
-    ///
-    /// The `FileIO` instance is lazily initialized on first use and cached, so
-    /// constructing once and reusing across many file opens amortizes the setup cost.
     #[staticmethod]
     fn from_props(props: HashMap<String, String>) -> PyResult<PyFileIO> {
         let factory = Arc::new(OpenDalResolvingStorageFactory::new());
-        let file_io = FileIOBuilder::new(factory)
-            .with_props(props.clone())
-            .build();
+        let file_io = FileIOBuilder::new(factory).with_props(props.clone()).build();
         Ok(PyFileIO {
             inner: file_io,
             props,
         })
     }
 
-    /// Check whether a file exists at the given path.
     fn exists(&self, path: String) -> PyResult<bool> {
         runtime()
             .block_on(self.inner.exists(&path))
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
-    /// Delete the file at the given path.
     fn delete(&self, path: String) -> PyResult<()> {
         runtime()
             .block_on(self.inner.delete(&path))
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
-    /// Open the file at `path` for reading and return a `InputFile` handle.
     fn new_input(&self, path: String) -> PyResult<PyInputFile> {
         let input = self
             .inner
@@ -91,7 +75,6 @@ impl PyFileIO {
         Ok(PyInputFile { inner: input })
     }
 
-    /// Open the file at `path` for writing and return an `OutputFile` handle.
     fn new_output(&self, path: String) -> PyResult<PyOutputFile> {
         let output = self
             .inner
@@ -101,7 +84,6 @@ impl PyFileIO {
     }
 
     fn __repr__(&self) -> String {
-        // Build a summary of the props, redacting sensitive values.
         let mut pairs: Vec<String> = self
             .props
             .iter()
@@ -114,7 +96,7 @@ impl PyFileIO {
                 format!("{k}={display}")
             })
             .collect();
-        pairs.sort(); // deterministic output
+        pairs.sort();
         if pairs.is_empty() {
             "FileIO()".to_string()
         } else {
@@ -123,9 +105,6 @@ impl PyFileIO {
     }
 }
 
-/// A handle for reading a single file.
-///
-/// Obtained via `FileIO.new_input(path)`.
 #[pyclass(name = "InputFile", module = "pyiceberg_core.file_io")]
 pub struct PyInputFile {
     inner: InputFile,
@@ -133,19 +112,16 @@ pub struct PyInputFile {
 
 #[pymethods]
 impl PyInputFile {
-    /// The absolute path this input file was opened on.
     fn location(&self) -> &str {
         self.inner.location()
     }
 
-    /// Return `True` if the file exists in the underlying storage.
     fn exists(&self) -> PyResult<bool> {
         runtime()
             .block_on(self.inner.exists())
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
-    /// Read the entire file content and return it as `bytes`.
     fn read(&self) -> PyResult<Vec<u8>> {
         let bytes = runtime()
             .block_on(self.inner.read())
@@ -153,7 +129,6 @@ impl PyInputFile {
         Ok(bytes.to_vec())
     }
 
-    /// Return a dict with file metadata.  Currently exposes `size` (bytes).
     fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let meta = runtime()
             .block_on(self.inner.metadata())
@@ -168,9 +143,6 @@ impl PyInputFile {
     }
 }
 
-/// A handle for writing a single file.
-///
-/// Obtained via `FileIO.new_output(path)`.
 #[pyclass(name = "OutputFile", module = "pyiceberg_core.file_io")]
 pub struct PyOutputFile {
     inner: OutputFile,
@@ -178,16 +150,13 @@ pub struct PyOutputFile {
 
 #[pymethods]
 impl PyOutputFile {
-    /// The absolute path this output file was opened on.
     fn location(&self) -> &str {
         self.inner.location()
     }
 
-    /// Write `data` to the file, replacing any existing content.
     fn write(&self, data: &[u8]) -> PyResult<()> {
-        let bs = Bytes::copy_from_slice(data);
         runtime()
-            .block_on(self.inner.write(bs))
+            .block_on(self.inner.write(data.to_vec().into()))
             .map_err(|e| PyIOError::new_err(e.to_string()))
     }
 
