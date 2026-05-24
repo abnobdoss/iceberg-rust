@@ -26,7 +26,7 @@ use pyo3::types::{PyCapsule, PyDict};
 
 use crate::error::to_py_err;
 
-pub const SCHEMA_CAPSULE_NAME: &std::ffi::CStr = c"iceberg_core_schema";
+pub(crate) const SCHEMA_CAPSULE_NAME: &std::ffi::CStr = c"iceberg_core_schema";
 
 #[pyclass(name = "Schema", module = "pyiceberg_core.schema", from_py_object)]
 #[derive(Clone)]
@@ -38,6 +38,7 @@ fn field_to_py(py: Python<'_>, field: &NestedField) -> PyResult<Py<PyAny>> {
     let d = PyDict::new(py);
     d.set_item("id", field.id)?;
     d.set_item("name", &field.name)?;
+    // Keep the binding opaque: expose nested Iceberg types as their spec JSON.
     d.set_item(
         "type",
         serde_json::to_string(field.field_type.as_ref())
@@ -76,6 +77,7 @@ impl PySchema {
             .collect()
     }
 
+    /// Return identifier field IDs in ascending order.
     fn identifier_field_ids(&self) -> Vec<i32> {
         let mut ids: Vec<i32> = self.inner.identifier_field_ids().collect();
         ids.sort_unstable();
