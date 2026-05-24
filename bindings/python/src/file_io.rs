@@ -16,27 +16,94 @@
 // under the License.
 
 use std::collections::HashMap;
+use std::error::Error as _;
 use std::sync::Arc;
 
+use iceberg::ErrorKind;
 use iceberg::io::{FileIO, FileIOBuilder, InputFile, OutputFile};
 use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
-use pyo3::exceptions::PyIOError;
+use opendal::{Error as OpenDalError, ErrorKind as OpenDalErrorKind};
+use pyo3::exceptions::{
+    PyFileNotFoundError, PyIOError, PyNotImplementedError, PyPermissionError, PyValueError,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::runtime::runtime;
 
 fn is_sensitive_key(key: &str) -> bool {
-    let lower = key.to_lowercase();
-    lower.contains("secret")
-        || lower.contains("key")
-        || lower.contains("token")
-        || lower.contains("password")
-        || lower.contains("credential")
-        || lower.contains("passphrase")
+    let lower = key.to_ascii_lowercase();
+    let normalized = lower.replace(['-', '_'], ".");
+    let parts: Vec<&str> = normalized
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    if parts.iter().any(|part| {
+        matches!(
+            *part,
+            "secret" | "token" | "password" | "credential" | "credentials" | "passphrase"
+        )
+    }) {
+        return true;
+    }
+
+    let dotted = parts.join(".");
+    parts.last().is_some_and(|part| *part == "key")
+        || [
+            "api.key",
+            "access.key",
+            "access.key.id",
+            "private.key",
+            "secret.key",
+            "secret.access.key",
+        ]
+        .iter()
+        .any(|suffix| has_dotted_suffix(&dotted, suffix))
 }
 
-#[pyclass(name = "FileIO", module = "pyiceberg_core.file_io", skip_from_py_object)]
+fn has_dotted_suffix(value: &str, suffix: &str) -> bool {
+    value == suffix
+        || value
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
+fn py_err_from_opendal_source(err: &iceberg::Error, message: &str) -> Option<PyErr> {
+    let source = err.source()?;
+    let opendal_err = source.downcast_ref::<OpenDalError>()?;
+
+    match opendal_err.kind() {
+        OpenDalErrorKind::NotFound => Some(PyFileNotFoundError::new_err(message.to_string())),
+        OpenDalErrorKind::PermissionDenied => Some(PyPermissionError::new_err(message.to_string())),
+        OpenDalErrorKind::ConfigInvalid => Some(PyValueError::new_err(message.to_string())),
+        OpenDalErrorKind::Unsupported => Some(PyNotImplementedError::new_err(message.to_string())),
+        _ => None,
+    }
+}
+
+fn to_py_io_err(err: iceberg::Error) -> PyErr {
+    let message = err.to_string();
+
+    if let Some(py_err) = py_err_from_opendal_source(&err, &message) {
+        return py_err;
+    }
+
+    match err.kind() {
+        ErrorKind::DataInvalid | ErrorKind::PreconditionFailed => PyValueError::new_err(message),
+        ErrorKind::FeatureUnsupported => PyNotImplementedError::new_err(message),
+        ErrorKind::TableNotFound | ErrorKind::NamespaceNotFound => {
+            PyFileNotFoundError::new_err(message)
+        }
+        _ => PyIOError::new_err(message),
+    }
+}
+
+#[pyclass(
+    name = "FileIO",
+    module = "pyiceberg_core.file_io",
+    skip_from_py_object
+)]
 #[derive(Clone)]
 pub struct PyFileIO {
     inner: FileIO,
@@ -48,7 +115,9 @@ impl PyFileIO {
     #[staticmethod]
     fn from_props(props: HashMap<String, String>) -> PyResult<PyFileIO> {
         let factory = Arc::new(OpenDalResolvingStorageFactory::new());
-        let file_io = FileIOBuilder::new(factory).with_props(props.clone()).build();
+        let file_io = FileIOBuilder::new(factory)
+            .with_props(props.clone())
+            .build();
         Ok(PyFileIO {
             inner: file_io,
             props,
@@ -59,7 +128,7 @@ impl PyFileIO {
         py.detach(|| {
             runtime()
                 .block_on(self.inner.exists(&path))
-                .map_err(|e| PyIOError::new_err(e.to_string()))
+                .map_err(to_py_io_err)
         })
     }
 
@@ -67,23 +136,17 @@ impl PyFileIO {
         py.detach(|| {
             runtime()
                 .block_on(self.inner.delete(&path))
-                .map_err(|e| PyIOError::new_err(e.to_string()))
+                .map_err(to_py_io_err)
         })
     }
 
     fn new_input(&self, path: String) -> PyResult<PyInputFile> {
-        let input = self
-            .inner
-            .new_input(&path)
-            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let input = self.inner.new_input(&path).map_err(to_py_io_err)?;
         Ok(PyInputFile { inner: input })
     }
 
     fn new_output(&self, path: String) -> PyResult<PyOutputFile> {
-        let output = self
-            .inner
-            .new_output(&path)
-            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+        let output = self.inner.new_output(&path).map_err(to_py_io_err)?;
         Ok(PyOutputFile { inner: output })
     }
 
@@ -124,16 +187,12 @@ impl PyInputFile {
         py.detach(|| {
             runtime()
                 .block_on(self.inner.exists())
-                .map_err(|e| PyIOError::new_err(e.to_string()))
+                .map_err(to_py_io_err)
         })
     }
 
     fn read<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = py.detach(|| {
-            runtime()
-                .block_on(self.inner.read())
-                .map_err(|e| PyIOError::new_err(e.to_string()))
-        })?;
+        let bytes = py.detach(|| runtime().block_on(self.inner.read()).map_err(to_py_io_err))?;
         Ok(PyBytes::new(py, &bytes))
     }
 
@@ -141,7 +200,7 @@ impl PyInputFile {
         py.detach(|| {
             runtime()
                 .block_on(self.inner.metadata())
-                .map_err(|e| PyIOError::new_err(e.to_string()))
+                .map_err(to_py_io_err)
                 .map(|meta| meta.size)
         })
     }
@@ -167,7 +226,7 @@ impl PyOutputFile {
         py.detach(|| {
             runtime()
                 .block_on(self.inner.write(data.into()))
-                .map_err(|e| PyIOError::new_err(e.to_string()))
+                .map_err(to_py_io_err)
         })
     }
 

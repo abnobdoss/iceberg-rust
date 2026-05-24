@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import threading
+
 import pytest
 
 from pyiceberg_core.file_io import FileIO, InputFile, OutputFile
@@ -39,8 +41,11 @@ def test_from_props_returns_independent_handles():
 @pytest.mark.parametrize(
     "key,value",
     [
+        ("access-key-id", "AKIAIOSFODNN7EXAMPLE"),
         ("s3.access-key-id", "AKIAIOSFODNN7EXAMPLE"),
         ("s3.secret-access-key", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+        ("s3.key", "plain-s3-key"),
+        ("adls.key", "plain-adls-key"),
         ("gcs.service.account.private.key", "BEGIN PRIVATE KEY"),
         ("token", "mytoken123"),
         ("password", "hunter2"),
@@ -59,6 +64,21 @@ def test_repr_shows_plain_values():
     r = repr(FileIO.from_props({"warehouse": "s3://bucket", "s3.region": "us-east-1"}))
     assert "s3.region=us-east-1" in r
     assert "warehouse=s3://bucket" in r
+
+
+def test_repr_does_not_redact_safe_key_terms():
+    r = repr(
+        FileIO.from_props(
+            {
+                "io.key-format": "plain",
+                "table.key-delimiter": "|",
+                "warehouse.key-prefix": "tables/",
+            }
+        )
+    )
+    assert "io.key-format=plain" in r
+    assert "table.key-delimiter=|" in r
+    assert "warehouse.key-prefix=tables/" in r
 
 
 def test_repr_empty_props():
@@ -124,11 +144,20 @@ def test_delete_removes_file(tmp_path):
     assert fio.exists(uri) is False
 
 
+def test_delete_missing_file_is_idempotent(tmp_path):
+    fio = local_fio()
+    uri = file_uri(tmp_path / "already-gone.txt")
+
+    fio.delete(uri)
+
+    assert fio.exists(uri) is False
+
+
 @pytest.mark.parametrize("method", ["read", "size"])
-def test_missing_input_operations_raise_io_error(tmp_path, method):
+def test_missing_input_operations_raise_file_not_found(tmp_path, method):
     inp = local_fio().new_input(file_uri(tmp_path / "missing.txt"))
 
-    with pytest.raises(OSError):
+    with pytest.raises(FileNotFoundError):
         getattr(inp, method)()
 
 
@@ -140,6 +169,30 @@ def test_handle_is_reusable_across_many_opens(tmp_path):
 
     for i in range(50):
         assert fio.new_input(file_uri(tmp_path / f"f{i}")).read() == b"x"
+
+
+def test_handle_supports_threaded_io(tmp_path):
+    fio = local_fio()
+    errors = []
+    lock = threading.Lock()
+
+    def worker(i):
+        try:
+            payload = bytes([i]) * 4096
+            uri = file_uri(tmp_path / f"threaded-{i}.bin")
+            fio.new_output(uri).write(payload)
+            assert fio.new_input(uri).read() == payload
+        except Exception as exc:
+            with lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
 
 
 def test_file_handle_repr_names_type_and_location(tmp_path):

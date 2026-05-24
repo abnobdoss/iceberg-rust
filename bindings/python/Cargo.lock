@@ -4206,6 +4206,7 @@ dependencies = [
  "iceberg",
  "iceberg-datafusion",
  "iceberg-storage-opendal",
+ "opendal",
  "pyo3",
  "tokio",
 ]
