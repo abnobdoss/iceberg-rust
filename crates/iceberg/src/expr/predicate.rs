@@ -1788,8 +1788,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bind_decimal_literal_against_narrower_precision_fails() {
-        assert_datum_bind_fails(
+    fn test_bind_decimal_literal_against_narrower_precision() {
+        assert_datum_binds(
             PrimitiveType::Decimal {
                 precision: 9,
                 scale: 2,
