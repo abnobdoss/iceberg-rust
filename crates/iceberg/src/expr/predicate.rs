@@ -459,17 +459,33 @@ impl Bind for Predicate {
             }
             Predicate::Set(expr) => {
                 let bound_expr = expr.bind(schema, case_sensitive)?;
-                let bound_literals = bound_expr
+                let mut bound_literals = bound_expr
                     .literals
                     .into_iter()
                     .map(|l| l.to(&bound_expr.term.field().field_type))
                     .collect::<Result<FnvHashSet<Datum>>>()?;
+                bound_literals.retain(|literal| {
+                    !matches!(
+                        literal.literal(),
+                        PrimitiveLiteral::AboveMax | PrimitiveLiteral::BelowMin
+                    )
+                });
+
+                if bound_literals.is_empty() {
+                    return Ok(match &bound_expr.op {
+                        &PredicateOperator::In => BoundPredicate::AlwaysFalse,
+                        &PredicateOperator::NotIn => BoundPredicate::AlwaysTrue,
+                        op => {
+                            return Err(Error::new(
+                                ErrorKind::Unexpected,
+                                format!("Expecting unary operator,but found {op}"),
+                            ));
+                        }
+                    });
+                }
 
                 match &bound_expr.op {
                     &PredicateOperator::In => {
-                        if bound_literals.is_empty() {
-                            return Ok(BoundPredicate::AlwaysFalse);
-                        }
                         if bound_literals.len() == 1 {
                             return Ok(BoundPredicate::Binary(BinaryExpression::new(
                                 PredicateOperator::Eq,
@@ -479,9 +495,6 @@ impl Bind for Predicate {
                         }
                     }
                     &PredicateOperator::NotIn => {
-                        if bound_literals.is_empty() {
-                            return Ok(BoundPredicate::AlwaysTrue);
-                        }
                         if bound_literals.len() == 1 {
                             return Ok(BoundPredicate::Binary(BinaryExpression::new(
                                 PredicateOperator::NotEq,
@@ -1835,5 +1848,51 @@ mod tests {
             Datum::double(1.5),
             "Can't convert datum from double type to float type.",
         );
+    }
+
+    #[test]
+    fn test_bind_int_overflow_binary_simplifies() {
+        let schema = schema_with_type(PrimitiveType::Int);
+
+        let above = Reference::new("c")
+            .equal_to(Datum::long(i64::MAX))
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(above, BoundPredicate::AlwaysFalse));
+
+        let below = Reference::new("c")
+            .not_equal_to(Datum::long(i64::MIN))
+            .bind(schema, true)
+            .unwrap();
+        assert!(matches!(below, BoundPredicate::AlwaysTrue));
+    }
+
+    #[test]
+    fn test_bind_int_overflow_set_simplifies() {
+        let schema = schema_with_type(PrimitiveType::Int);
+
+        let in_above = Reference::new("c")
+            .is_in([Datum::long(i64::MAX)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(in_above, BoundPredicate::AlwaysFalse));
+
+        let not_in_above = Reference::new("c")
+            .is_not_in([Datum::long(i64::MAX)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(not_in_above, BoundPredicate::AlwaysTrue));
+
+        let in_mixed = Reference::new("c")
+            .is_in([Datum::long(i64::MAX), Datum::long(5)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert_eq!(&format!("{in_mixed}"), "c = 5");
+
+        let not_in_mixed = Reference::new("c")
+            .is_not_in([Datum::long(i64::MIN), Datum::long(5)])
+            .bind(schema, true)
+            .unwrap();
+        assert_eq!(&format!("{not_in_mixed}"), "c != 5");
     }
 }
