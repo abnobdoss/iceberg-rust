@@ -822,6 +822,7 @@ mod tests {
     use std::ops::Not;
     use std::sync::Arc;
 
+    use crate::ErrorKind;
     use crate::expr::Predicate::{AlwaysFalse, AlwaysTrue};
     use crate::expr::{Bind, BoundPredicate, Reference};
     use crate::spec::{Datum, NestedField, PrimitiveType, Schema, SchemaRef, Type};
@@ -1700,6 +1701,139 @@ mod tests {
         assert_eq!(
             &format!("{result}"),
             "((bar >= 10) AND (foo IS NOT NULL)) AND (bar >= 5)"
+        );
+    }
+
+    fn schema_with_type(field_type: PrimitiveType) -> SchemaRef {
+        Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::optional(1, "c", Type::Primitive(field_type)).into(),
+                ])
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn assert_datum_binds(field_type: PrimitiveType, datum: Datum) {
+        let schema = schema_with_type(field_type.clone());
+        let pred = Reference::new("c").equal_to(datum);
+
+        let bound_predicate = pred.bind(schema, true).unwrap();
+        let BoundPredicate::Binary(expr) = bound_predicate else {
+            panic!("expected binary predicate, got {bound_predicate:?}");
+        };
+
+        assert_eq!(expr.term().field().id, 1);
+        assert_eq!(
+            expr.term().field().field_type.as_ref(),
+            &Type::Primitive(field_type.clone())
+        );
+        assert_eq!(expr.literal().data_type(), &field_type);
+    }
+
+    fn assert_datum_bind_fails(field_type: PrimitiveType, datum: Datum, expected_message: &str) {
+        let schema = schema_with_type(field_type);
+        let pred = Reference::new("c").equal_to(datum);
+
+        let err = pred.bind(schema, true).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DataInvalid);
+        assert!(
+            err.to_string().contains(expected_message),
+            "expected error to contain {expected_message:?}, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_bool() {
+        assert_datum_binds(PrimitiveType::Boolean, Datum::bool(true));
+        assert_datum_binds(PrimitiveType::Boolean, Datum::bool(false));
+    }
+
+    #[test]
+    fn test_bind_datum_bool_wrong_type_fails() {
+        assert_datum_bind_fails(
+            PrimitiveType::Boolean,
+            Datum::int(1),
+            "Can't convert datum from int type to boolean type.",
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_string_against_date_fails() {
+        assert_datum_bind_fails(
+            PrimitiveType::Date,
+            Datum::string("2026-05-24"),
+            "Can't convert datum from string type to date type.",
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_date() {
+        assert_datum_binds(
+            PrimitiveType::Date,
+            Datum::date_from_str("2026-05-24").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_time() {
+        assert_datum_binds(
+            PrimitiveType::Time,
+            Datum::time_from_str("10:30:00.123456").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_timestamp_naive() {
+        assert_datum_binds(
+            PrimitiveType::Timestamp,
+            Datum::timestamp_from_str("2026-05-24T10:30:00.123456").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_timestamptz() {
+        assert_datum_binds(
+            PrimitiveType::Timestamptz,
+            Datum::timestamptz_from_str("2026-05-24T10:30:00+00:00").unwrap(),
+        );
+        assert_datum_binds(
+            PrimitiveType::Timestamptz,
+            Datum::timestamptz_from_str("2026-05-24T10:30:00-05:00").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_decimal() {
+        assert_datum_binds(
+            PrimitiveType::Decimal {
+                precision: 38,
+                scale: 2,
+            },
+            Datum::decimal_from_str("3.14").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_decimal_narrower_precision_fails() {
+        assert_datum_bind_fails(
+            PrimitiveType::Decimal {
+                precision: 9,
+                scale: 2,
+            },
+            Datum::decimal_from_str("3.14").unwrap(),
+            "Can't convert datum from decimal(38,2) type to decimal(9,2) type.",
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_double_against_float_fails() {
+        assert_datum_bind_fails(
+            PrimitiveType::Float,
+            Datum::double(1.5),
+            "Can't convert datum from double type to float type.",
         );
     }
 }
