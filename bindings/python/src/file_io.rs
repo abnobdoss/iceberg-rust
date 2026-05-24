@@ -22,7 +22,7 @@ use iceberg::io::{FileIO, FileIOBuilder, InputFile, OutputFile};
 use iceberg_storage_opendal::OpenDalResolvingStorageFactory;
 use pyo3::exceptions::PyIOError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::PyBytes;
 
 use crate::runtime::runtime;
 
@@ -36,7 +36,7 @@ fn is_sensitive_key(key: &str) -> bool {
         || lower.contains("passphrase")
 }
 
-#[pyclass(name = "FileIO", module = "pyiceberg_core.file_io", from_py_object)]
+#[pyclass(name = "FileIO", module = "pyiceberg_core.file_io", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyFileIO {
     inner: FileIO,
@@ -55,16 +55,20 @@ impl PyFileIO {
         })
     }
 
-    fn exists(&self, path: String) -> PyResult<bool> {
-        runtime()
-            .block_on(self.inner.exists(&path))
-            .map_err(|e| PyIOError::new_err(e.to_string()))
+    fn exists(&self, py: Python<'_>, path: String) -> PyResult<bool> {
+        py.detach(|| {
+            runtime()
+                .block_on(self.inner.exists(&path))
+                .map_err(|e| PyIOError::new_err(e.to_string()))
+        })
     }
 
-    fn delete(&self, path: String) -> PyResult<()> {
-        runtime()
-            .block_on(self.inner.delete(&path))
-            .map_err(|e| PyIOError::new_err(e.to_string()))
+    fn delete(&self, py: Python<'_>, path: String) -> PyResult<()> {
+        py.detach(|| {
+            runtime()
+                .block_on(self.inner.delete(&path))
+                .map_err(|e| PyIOError::new_err(e.to_string()))
+        })
     }
 
     fn new_input(&self, path: String) -> PyResult<PyInputFile> {
@@ -116,26 +120,30 @@ impl PyInputFile {
         self.inner.location()
     }
 
-    fn exists(&self) -> PyResult<bool> {
-        runtime()
-            .block_on(self.inner.exists())
-            .map_err(|e| PyIOError::new_err(e.to_string()))
+    fn exists(&self, py: Python<'_>) -> PyResult<bool> {
+        py.detach(|| {
+            runtime()
+                .block_on(self.inner.exists())
+                .map_err(|e| PyIOError::new_err(e.to_string()))
+        })
     }
 
-    fn read(&self) -> PyResult<Vec<u8>> {
-        let bytes = runtime()
-            .block_on(self.inner.read())
-            .map_err(|e| PyIOError::new_err(e.to_string()))?;
-        Ok(bytes.to_vec())
+    fn read<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = py.detach(|| {
+            runtime()
+                .block_on(self.inner.read())
+                .map_err(|e| PyIOError::new_err(e.to_string()))
+        })?;
+        Ok(PyBytes::new(py, &bytes))
     }
 
-    fn metadata<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let meta = runtime()
-            .block_on(self.inner.metadata())
-            .map_err(|e| PyIOError::new_err(e.to_string()))?;
-        let d = PyDict::new(py);
-        d.set_item("size", meta.size)?;
-        Ok(d)
+    fn size(&self, py: Python<'_>) -> PyResult<u64> {
+        py.detach(|| {
+            runtime()
+                .block_on(self.inner.metadata())
+                .map_err(|e| PyIOError::new_err(e.to_string()))
+                .map(|meta| meta.size)
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -154,10 +162,13 @@ impl PyOutputFile {
         self.inner.location()
     }
 
-    fn write(&self, data: &[u8]) -> PyResult<()> {
-        runtime()
-            .block_on(self.inner.write(data.to_vec().into()))
-            .map_err(|e| PyIOError::new_err(e.to_string()))
+    fn write(&self, py: Python<'_>, data: &[u8]) -> PyResult<()> {
+        let data = data.to_vec();
+        py.detach(|| {
+            runtime()
+                .block_on(self.inner.write(data.into()))
+                .map_err(|e| PyIOError::new_err(e.to_string()))
+        })
     }
 
     fn __repr__(&self) -> String {
@@ -173,6 +184,5 @@ pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_submodule(&this)?;
     py.import("sys")?
         .getattr("modules")?
-        .set_item("pyiceberg_core.file_io", this)?;
-    Ok(())
+        .set_item("pyiceberg_core.file_io", this)
 }

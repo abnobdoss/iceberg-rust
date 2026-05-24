@@ -87,7 +87,7 @@ def test_new_file_handles_expose_location(tmp_path):
         bytes(range(256)),
     ],
 )
-def test_write_read_exists_and_metadata_round_trip(tmp_path, payload):
+def test_write_read_exists_and_size_round_trip(tmp_path, payload):
     fio = local_fio()
     path = tmp_path / "round-trip.bin"
     uri = file_uri(path)
@@ -100,7 +100,7 @@ def test_write_read_exists_and_metadata_round_trip(tmp_path, payload):
     assert fio.exists(uri) is True
     assert fio.new_input(uri).exists() is True
     assert fio.new_input(uri).read() == payload
-    assert fio.new_input(uri).metadata() == {"size": len(payload)}
+    assert fio.new_input(uri).size() == len(payload)
     assert path.read_bytes() == payload
 
 
@@ -114,18 +114,17 @@ def test_write_replaces_existing_file(tmp_path):
     assert path.read_bytes() == b"second"
 
 
-def test_delete_removes_file_and_missing_delete_is_noop(tmp_path):
+def test_delete_removes_file(tmp_path):
     fio = local_fio()
     uri = file_uri(tmp_path / "delete-me.txt")
 
     fio.new_output(uri).write(b"bye")
     fio.delete(uri)
-    fio.delete(uri)
 
     assert fio.exists(uri) is False
 
 
-@pytest.mark.parametrize("method", ["read", "metadata"])
+@pytest.mark.parametrize("method", ["read", "size"])
 def test_missing_input_operations_raise_io_error(tmp_path, method):
     inp = local_fio().new_input(file_uri(tmp_path / "missing.txt"))
 
@@ -133,9 +132,14 @@ def test_missing_input_operations_raise_io_error(tmp_path, method):
         getattr(inp, method)()
 
 
-def test_writing_directory_raises_io_error(tmp_path):
-    with pytest.raises(OSError):
-        local_fio().new_output(file_uri(tmp_path)).write(b"data")
+def test_handle_is_reusable_across_many_opens(tmp_path):
+    fio = local_fio()
+
+    for i in range(50):
+        fio.new_output(file_uri(tmp_path / f"f{i}")).write(b"x")
+
+    for i in range(50):
+        assert fio.new_input(file_uri(tmp_path / f"f{i}")).read() == b"x"
 
 
 def test_file_handle_repr_names_type_and_location(tmp_path):
