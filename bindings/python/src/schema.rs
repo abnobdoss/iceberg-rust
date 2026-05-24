@@ -84,6 +84,10 @@ impl PySchema {
         ids
     }
 
+    /// Return field metadata for a case-sensitive dotted field name.
+    ///
+    /// The returned dict uses native Python values for "id", "name", and
+    /// "required"; "type" is an Iceberg type encoded as a JSON string.
     fn find_field_by_name(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyAny>>> {
         self.inner
             .field_by_name(name)
@@ -91,6 +95,10 @@ impl PySchema {
             .transpose()
     }
 
+    /// Return field metadata for a field ID.
+    ///
+    /// The returned dict uses native Python values for "id", "name", and
+    /// "required"; "type" is an Iceberg type encoded as a JSON string.
     fn field_by_id(&self, py: Python<'_>, field_id: i32) -> PyResult<Py<PyAny>> {
         let field = self
             .inner

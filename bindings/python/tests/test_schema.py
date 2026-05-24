@@ -126,6 +126,12 @@ V1_SCHEMA = {
     ],
 }
 
+EMPTY_SCHEMA = {
+    "type": "struct",
+    "schema-id": 0,
+    "fields": [],
+}
+
 
 def schema_json(schema: dict) -> str:
     return json.dumps(schema)
@@ -201,6 +207,17 @@ def test_column_names_are_top_level_only():
         "location",
         "person",
     ]
+
+
+def test_empty_schema_metadata_and_repr():
+    handle = Schema.from_json(schema_json(EMPTY_SCHEMA))
+
+    assert handle.schema_id() == 0
+    assert handle.highest_field_id() == 0
+    assert handle.column_names() == []
+    assert handle.identifier_field_ids() == []
+    assert "fields=0" in repr(handle)
+    assert "columns=[]" in repr(handle)
 
 
 @pytest.mark.parametrize(
