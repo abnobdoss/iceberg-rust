@@ -291,6 +291,16 @@ fn schema_top_level_field_ids(schema: &PySchema) -> Vec<i32> {
         .collect()
 }
 
+fn schema_top_level_field_names(schema: &PySchema) -> Vec<String> {
+    schema
+        .inner
+        .as_struct()
+        .fields()
+        .iter()
+        .map(|field| field.name.clone())
+        .collect()
+}
+
 fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) -> PyResult<()> {
     let output_field_ids = schema_top_level_field_ids(output_schema);
     for task in tasks {
@@ -300,6 +310,24 @@ fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) 
                 output_field_ids, task.project_field_ids, task.data_file_path
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_selected_fields_match_output_schema(
+    output_schema: &PySchema,
+    selected_fields: Option<&[String]>,
+) -> PyResult<()> {
+    let Some(selected) = selected_fields else {
+        return Ok(());
+    };
+
+    let output_names = schema_top_level_field_names(output_schema);
+    if output_names != selected && selected.iter().all(|name| output_names.contains(name)) {
+        return Err(PyValueError::new_err(format!(
+            "output_schema columns {:?} must match selected_fields {:?}",
+            output_names, selected
+        )));
     }
     Ok(())
 }
@@ -810,6 +838,125 @@ impl PyTable {
             .collect();
 
         Ok(py_tasks)
+    }
+
+    #[pyo3(signature = (
+        output_schema,
+        *,
+        selected_fields = None,
+        predicate = None,
+        snapshot_id = None,
+        case_sensitive = true,
+        max_rows = None,
+        batch_size = Some(65536),
+        data_file_concurrency_limit = None,
+        concurrency_limit = None,
+        manifest_entry_concurrency_limit = None,
+        row_group_filtering_enabled = true,
+        row_selection_enabled = false
+    ))]
+    fn read_arrow<'py>(
+        &self,
+        py: Python<'py>,
+        output_schema: &PySchema,
+        selected_fields: Option<Vec<String>>,
+        predicate: Option<&Bound<'_, PyPredicate>>,
+        snapshot_id: Option<i64>,
+        case_sensitive: bool,
+        max_rows: Option<usize>,
+        batch_size: Option<usize>,
+        data_file_concurrency_limit: Option<usize>,
+        concurrency_limit: Option<usize>,
+        manifest_entry_concurrency_limit: Option<usize>,
+        row_group_filtering_enabled: bool,
+        row_selection_enabled: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let mut scan_builder = self.inner.scan();
+
+        validate_selected_fields_match_output_schema(output_schema, selected_fields.as_deref())?;
+
+        if let Some(fields) = selected_fields {
+            if fields.is_empty() {
+                scan_builder = scan_builder.select_empty();
+            } else {
+                scan_builder = scan_builder.select(fields);
+            }
+        } else {
+            scan_builder = scan_builder.select_all();
+        }
+
+        if let Some(pred_bound) = predicate {
+            let pred = pred_bound.extract::<PyRef<'_, PyPredicate>>()?;
+            scan_builder = scan_builder.with_filter(pred.inner.clone());
+        }
+
+        if let Some(snap_id) = snapshot_id {
+            scan_builder = scan_builder.snapshot_id(snap_id);
+        }
+
+        scan_builder = scan_builder.with_case_sensitive(case_sensitive);
+
+        if let Some(limit) = concurrency_limit {
+            scan_builder = scan_builder.with_concurrency_limit(limit);
+        }
+
+        if let Some(limit) = manifest_entry_concurrency_limit {
+            scan_builder = scan_builder.with_manifest_entry_concurrency_limit(limit);
+        }
+
+        let df_concurrency = data_file_concurrency_limit;
+        if let Some(limit) = df_concurrency {
+            scan_builder = scan_builder.with_data_file_concurrency_limit(limit);
+        }
+
+        scan_builder = scan_builder.with_row_group_filtering_enabled(row_group_filtering_enabled);
+        scan_builder = scan_builder.with_row_selection_enabled(row_selection_enabled);
+        if let Some(bs) = batch_size {
+            scan_builder = scan_builder.with_batch_size(Some(bs));
+        }
+
+        let scan = scan_builder.build().map_err(crate::error::to_py_err)?;
+
+        let rust_tasks = py.detach(|| {
+            let task_stream = runtime()
+                .block_on(async { scan.plan_files().await })
+                .map_err(crate::error::to_py_err)?;
+
+            runtime()
+                .block_on(async { task_stream.try_collect::<Vec<FileScanTask>>().await })
+                .map_err(crate::error::to_py_err)
+        })?;
+
+        validate_reader_projection(output_schema, &rust_tasks)?;
+        let schema = arrow_schema_for_reader(output_schema, &rust_tasks)?;
+
+        let task_stream_for_reader = Box::pin(stream::iter(rust_tasks.into_iter().map(Ok))) as FileScanTaskStream;
+
+        let mut reader_builder = ArrowReaderBuilder::new(self.inner.file_io().clone(), iceberg_runtime())
+            .with_row_group_filtering_enabled(row_group_filtering_enabled)
+            .with_row_selection_enabled(row_selection_enabled);
+
+        if let Some(bs) = batch_size {
+            reader_builder = reader_builder.with_batch_size(bs);
+        }
+        if let Some(limit) = df_concurrency {
+            reader_builder = reader_builder.with_data_file_concurrency_limit(limit);
+        }
+
+        let stream = reader_builder
+            .build()
+            .read(task_stream_for_reader)
+            .map_err(crate::error::to_py_err)?
+            .stream();
+
+        let reader: Box<dyn RecordBatchReader + Send> =
+            Box::new(BlockingArrowRecordBatchReader {
+                schema,
+                stream,
+                remaining_rows: max_rows,
+            });
+
+        reader.into_pyarrow(py)
     }
 }
 
