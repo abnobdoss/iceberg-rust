@@ -94,6 +94,19 @@ def test_file_scan_task_properties_without_deletes():
     assert task.case_sensitive is True
 
 
+def test_file_scan_task_default_length_uses_remaining_file_size():
+    task = FileScanTask(
+        schema(),
+        "s3://bucket/data.parquet",
+        1024,
+        [1],
+        start=128,
+    )
+
+    assert task.start == 128
+    assert task.length == 896
+
+
 def test_file_scan_task_binds_predicate_and_deletes():
     delete = DeleteFile("s3://bucket/delete.parquet", 128, "position-deletes")
     task = FileScanTask(
@@ -110,6 +123,136 @@ def test_file_scan_task_binds_predicate_and_deletes():
     assert task.length == 512
     assert task.delete_count == 1
     assert task.has_predicate is True
+
+
+def test_file_scan_task_accepts_partition_context_and_name_mapping():
+    partition_spec = json.dumps(
+        {
+            "spec-id": 1,
+            "fields": [
+                {
+                    "source-id": 1,
+                    "field-id": 1000,
+                    "name": "id",
+                    "transform": "identity",
+                }
+            ],
+        }
+    )
+    name_mapping = json.dumps([{"field-id": 1, "names": ["id", "record_id"]}])
+
+    task = FileScanTask(
+        schema(),
+        "s3://bucket/data.parquet",
+        1024,
+        [1],
+        partition_data=[7],
+        partition_spec=partition_spec,
+        name_mapping=name_mapping,
+    )
+
+    assert task.has_partition_data is True
+    assert task.has_partition_spec is True
+    assert task.has_name_mapping is True
+
+
+def test_file_scan_task_accepts_partition_data_json_array():
+    partition_spec = json.dumps(
+        {
+            "fields": [
+                {
+                    "source-id": 2,
+                    "field-id": 1000,
+                    "name": "name",
+                    "transform": "identity",
+                }
+            ]
+        }
+    )
+
+    task = FileScanTask(
+        schema(),
+        "s3://bucket/data.parquet",
+        1024,
+        [2],
+        partition_data=json.dumps(["alice"]),
+        partition_spec=partition_spec,
+    )
+
+    assert task.has_partition_data is True
+    assert task.has_partition_spec is True
+    assert task.has_name_mapping is False
+
+
+def test_file_scan_task_rejects_partition_data_without_spec():
+    with pytest.raises(ValueError, match="partition_spec is required"):
+        FileScanTask(
+            schema(),
+            "s3://bucket/data.parquet",
+            1024,
+            [1],
+            partition_data=[7],
+        )
+
+
+def test_file_scan_task_rejects_partition_data_length_mismatch():
+    partition_spec = json.dumps(
+        {
+            "fields": [
+                {
+                    "source-id": 1,
+                    "field-id": 1000,
+                    "name": "id",
+                    "transform": "identity",
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError, match="partition_data length"):
+        FileScanTask(
+            schema(),
+            "s3://bucket/data.parquet",
+            1024,
+            [1],
+            partition_data=[],
+            partition_spec=partition_spec,
+        )
+
+
+def test_file_scan_task_rejects_start_beyond_file_size():
+    with pytest.raises(ValueError, match="start \\(1025\\).*file_size_in_bytes \\(1024\\)"):
+        FileScanTask(
+            schema(),
+            "s3://bucket/data.parquet",
+            1024,
+            [1],
+            start=1025,
+        )
+
+
+def test_file_scan_task_rejects_length_beyond_file_size():
+    with pytest.raises(ValueError, match="start \\(128\\) \\+ length \\(897\\)"):
+        FileScanTask(
+            schema(),
+            "s3://bucket/data.parquet",
+            1024,
+            [1],
+            start=128,
+            length=897,
+        )
+
+
+def test_file_scan_task_rejects_start_plus_length_overflow():
+    with pytest.raises(ValueError, match="overflows u64"):
+        FileScanTask(
+            schema(),
+            "s3://bucket/data.parquet",
+            2**64 - 1,
+            [1],
+            start=2**64 - 2,
+            length=2,
+        )
 
 
 def test_file_scan_task_rejects_unbindable_predicate():
