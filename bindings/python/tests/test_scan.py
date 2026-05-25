@@ -17,10 +17,12 @@
 
 import json
 
+import pyarrow as pa
 import pytest
 
 from pyiceberg_core.expression import Reference
-from pyiceberg_core.scan import DeleteFile, FileScanTask
+from pyiceberg_core.file_io import FileIO
+from pyiceberg_core.scan import ArrowReader, DeleteFile, FileScanTask
 from pyiceberg_core.schema import Schema
 
 
@@ -33,6 +35,35 @@ def schema() -> Schema:
                 "fields": [
                     {"id": 1, "name": "id", "required": True, "type": "long"},
                     {"id": 2, "name": "name", "required": False, "type": "string"},
+                ],
+            }
+        )
+    )
+
+
+def id_schema() -> Schema:
+    return Schema.from_json(
+        json.dumps(
+            {
+                "type": "struct",
+                "schema-id": 1,
+                "fields": [
+                    {"id": 1, "name": "id", "required": True, "type": "long"},
+                ],
+            }
+        )
+    )
+
+
+def id_file_schema() -> Schema:
+    return Schema.from_json(
+        json.dumps(
+            {
+                "type": "struct",
+                "schema-id": 1,
+                "fields": [
+                    {"id": 1, "name": "id", "required": True, "type": "long"},
+                    {"id": 2147483646, "name": "_file", "required": True, "type": "string"},
                 ],
             }
         )
@@ -275,3 +306,71 @@ def test_file_scan_task_rejects_non_delete_sequence_item():
             [1],
             deletes=["not a delete file"],
         )
+
+
+def test_arrow_reader_returns_pyarrow_record_batch_reader_for_empty_task_stream():
+    reader = ArrowReader(FileIO.from_props({}))
+
+    batch_reader = reader.read(schema(), [])
+
+    assert isinstance(batch_reader, pa.RecordBatchReader)
+    assert batch_reader.schema.names == ["id", "name"]
+    with pytest.raises(StopIteration):
+        batch_reader.read_next_batch()
+
+
+def test_arrow_reader_rejects_output_schema_that_does_not_match_task_projection():
+    reader = ArrowReader(FileIO.from_props({}))
+    task = FileScanTask(
+        schema(),
+        "s3://bucket/data.parquet",
+        1024,
+        [1],
+    )
+
+    with pytest.raises(ValueError, match="output_schema field ids .* project_field_ids"):
+        reader.read(schema(), [task])
+
+    projected_reader = reader.read(id_schema(), [task])
+    assert isinstance(projected_reader, pa.RecordBatchReader)
+
+
+def test_arrow_reader_rejects_metadata_projection_until_exact_reader_schema_is_exported():
+    reader = ArrowReader(FileIO.from_props({}))
+    task = FileScanTask(
+        schema(),
+        "s3://bucket/data.parquet",
+        1024,
+        [1, 2147483646],
+    )
+
+    with pytest.raises(ValueError, match="metadata field projections"):
+        reader.read(id_file_schema(), [task])
+
+
+def test_arrow_reader_rejects_partition_data_until_exact_reader_schema_is_exported():
+    partition_spec = json.dumps(
+        {
+            "spec-id": 1,
+            "fields": [
+                {
+                    "source-id": 1,
+                    "field-id": 1000,
+                    "name": "id",
+                    "transform": "identity",
+                }
+            ],
+        }
+    )
+    reader = ArrowReader(FileIO.from_props({}))
+    task = FileScanTask(
+        schema(),
+        "s3://bucket/data.parquet",
+        1024,
+        [1],
+        partition_data=[7],
+        partition_spec=partition_spec,
+    )
+
+    with pytest.raises(ValueError, match="partition data projections"):
+        reader.read(id_schema(), [task])

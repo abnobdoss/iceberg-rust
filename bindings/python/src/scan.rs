@@ -17,8 +17,17 @@
 
 use std::sync::Arc;
 
+use arrow::datatypes::SchemaRef as ArrowSchemaRef;
+use arrow::error::{ArrowError, Result as ArrowResult};
+use arrow::pyarrow::IntoPyArrow;
+use arrow::record_batch::{RecordBatch, RecordBatchReader};
+use futures::{StreamExt, stream};
+use iceberg::arrow::{ArrowReaderBuilder, schema_to_arrow_schema};
 use iceberg::expr::Bind;
-use iceberg::scan::{FileScanTask, FileScanTaskDeleteFile};
+use iceberg::metadata_columns::is_metadata_field;
+use iceberg::scan::{
+    ArrowRecordBatchStream, FileScanTask, FileScanTaskDeleteFile, FileScanTaskStream,
+};
 use iceberg::spec::{
     DataContentType, DataFileFormat, Literal, NameMapping, PartitionSpec, Struct,
     UnboundPartitionSpec,
@@ -29,6 +38,8 @@ use pyo3::types::{PyAny, PyBool, PyBytes, PyFloat, PyInt, PySequence, PyString};
 use serde_json::{Number as JsonNumber, Value as JsonValue};
 
 use crate::expression::PyPredicate;
+use crate::file_io::PyFileIO;
+use crate::runtime::{iceberg_runtime, runtime};
 use crate::schema::PySchema;
 
 fn parse_data_file_format(value: &str) -> PyResult<DataFileFormat> {
@@ -88,6 +99,20 @@ fn py_deletes_to_rust(values: Option<&Bound<'_, PyAny>>) -> PyResult<Vec<FileSca
         let item = seq.get_item(i)?;
         let delete = item.extract::<PyRef<'_, PyDeleteFile>>()?;
         out.push(delete.inner.clone());
+    }
+    Ok(out)
+}
+
+fn py_tasks_to_rust(values: &Bound<'_, PyAny>) -> PyResult<Vec<FileScanTask>> {
+    let seq = values.cast::<PySequence>().map_err(|_| {
+        PyTypeError::new_err("tasks must be a sequence of pyiceberg_core.scan.FileScanTask values")
+    })?;
+    let len = seq.len()?;
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        let item = seq.get_item(i)?;
+        let task = item.extract::<PyRef<'_, PyFileScanTask>>()?;
+        out.push(task.inner.clone());
     }
     Ok(out)
 }
@@ -254,6 +279,53 @@ fn validate_scan_range(file_size_in_bytes: u64, start: u64, length: Option<u64>)
     }
 
     Ok(length)
+}
+
+fn schema_top_level_field_ids(schema: &PySchema) -> Vec<i32> {
+    schema
+        .inner
+        .as_struct()
+        .fields()
+        .iter()
+        .map(|field| field.id)
+        .collect()
+}
+
+fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) -> PyResult<()> {
+    let output_field_ids = schema_top_level_field_ids(output_schema);
+    if let Some(field_id) = output_field_ids
+        .iter()
+        .copied()
+        .find(|id| is_metadata_field(*id))
+    {
+        return Err(PyValueError::new_err(format!(
+            "ArrowReader does not yet support metadata field projections; field id {field_id} requires the reader-produced Arrow schema"
+        )));
+    }
+    for task in tasks {
+        if task.partition.is_some() {
+            return Err(PyValueError::new_err(
+                "ArrowReader does not yet support partition data projections; partition constants require the reader-produced Arrow schema",
+            ));
+        }
+        if let Some(field_id) = task
+            .project_field_ids
+            .iter()
+            .copied()
+            .find(|id| is_metadata_field(*id))
+        {
+            return Err(PyValueError::new_err(format!(
+                "ArrowReader does not yet support metadata field projections; field id {field_id} requires the reader-produced Arrow schema"
+            )));
+        }
+        if task.project_field_ids != output_field_ids {
+            return Err(PyValueError::new_err(format!(
+                "output_schema field ids {:?} must match task project_field_ids {:?} for {}; pass the projected schema used to build the tasks",
+                output_field_ids, task.project_field_ids, task.data_file_path
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[pyclass(
@@ -480,10 +552,109 @@ impl PyFileScanTask {
     }
 }
 
+struct BlockingArrowRecordBatchReader {
+    schema: ArrowSchemaRef,
+    stream: ArrowRecordBatchStream,
+}
+
+impl Iterator for BlockingArrowRecordBatchReader {
+    type Item = ArrowResult<RecordBatch>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        runtime()
+            .block_on(self.stream.next())
+            .map(|result| result.map_err(|err| ArrowError::ExternalError(Box::new(err))))
+    }
+}
+
+impl RecordBatchReader for BlockingArrowRecordBatchReader {
+    fn schema(&self) -> ArrowSchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+#[pyclass(
+    name = "ArrowReader",
+    module = "pyiceberg_core.scan",
+    skip_from_py_object
+)]
+pub struct PyArrowReader {
+    file_io: iceberg::io::FileIO,
+    batch_size: Option<usize>,
+    data_file_concurrency_limit: Option<usize>,
+    row_group_filtering_enabled: bool,
+    row_selection_enabled: bool,
+}
+
+#[pymethods]
+impl PyArrowReader {
+    #[new]
+    #[pyo3(signature = (
+        file_io,
+        *,
+        batch_size = None,
+        data_file_concurrency_limit = None,
+        row_group_filtering_enabled = true,
+        row_selection_enabled = false
+    ))]
+    fn new(
+        file_io: &PyFileIO,
+        batch_size: Option<usize>,
+        data_file_concurrency_limit: Option<usize>,
+        row_group_filtering_enabled: bool,
+        row_selection_enabled: bool,
+    ) -> Self {
+        Self {
+            file_io: file_io.inner.clone(),
+            batch_size,
+            data_file_concurrency_limit,
+            row_group_filtering_enabled,
+            row_selection_enabled,
+        }
+    }
+
+    fn read<'py>(
+        &self,
+        py: Python<'py>,
+        output_schema: &PySchema,
+        tasks: &Bound<'_, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let rust_tasks = py_tasks_to_rust(tasks)?;
+        validate_reader_projection(output_schema, &rust_tasks)?;
+        let task_stream =
+            Box::pin(stream::iter(rust_tasks.into_iter().map(Ok))) as FileScanTaskStream;
+
+        let mut builder = ArrowReaderBuilder::new(self.file_io.clone(), iceberg_runtime())
+            .with_row_group_filtering_enabled(self.row_group_filtering_enabled)
+            .with_row_selection_enabled(self.row_selection_enabled);
+        if let Some(batch_size) = self.batch_size {
+            builder = builder.with_batch_size(batch_size);
+        }
+        if let Some(limit) = self.data_file_concurrency_limit {
+            builder = builder.with_data_file_concurrency_limit(limit);
+        }
+
+        let stream = builder
+            .build()
+            .read(task_stream)
+            .map_err(crate::error::to_py_err)?
+            .stream();
+        let schema = Arc::new(
+            schema_to_arrow_schema(output_schema.inner.as_ref())
+                .map_err(crate::error::to_py_err)?,
+        );
+        let reader: Box<dyn RecordBatchReader + Send> =
+            Box::new(BlockingArrowRecordBatchReader { schema, stream });
+
+        reader.into_pyarrow(py)
+    }
+}
+
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let this = PyModule::new(py, "scan")?;
     this.add_class::<PyDeleteFile>()?;
     this.add_class::<PyFileScanTask>()?;
+    this.add_class::<PyArrowReader>()?;
     m.add_submodule(&this)?;
     py.import("sys")?
         .getattr("modules")?
