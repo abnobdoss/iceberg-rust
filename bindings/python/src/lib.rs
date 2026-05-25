@@ -21,6 +21,7 @@ mod data_file;
 mod datafusion_table_provider;
 mod error;
 mod expression;
+mod file_io;
 mod manifest;
 mod runtime;
 mod transform;
@@ -31,5 +32,6 @@ fn pyiceberg_core_rust(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     transform::register_module(py, m)?;
     manifest::register_module(py, m)?;
     expression::register_module(py, m)?;
+    file_io::register_module(py, m)?;
     Ok(())
 }
