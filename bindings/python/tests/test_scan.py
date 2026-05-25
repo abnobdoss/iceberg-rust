@@ -476,3 +476,77 @@ def test_arrow_reader_with_real_parquet_and_limits(tmp_path):
     batch_reader_limit_0 = reader.read(schema(), [task_limit_0], max_rows=0)
     res_table_limit_0 = batch_reader_limit_0.read_all()
     assert len(res_table_limit_0) == 0
+
+
+TABLE_METADATA_JSON = json.dumps(
+    {
+        "format-version": 2,
+        "table-uuid": "fb070e82-2d1f-4ef6-8ab6-c4d12c6ed490",
+        "location": "s3://bucket/table",
+        "last-sequence-number": 1,
+        "last-updated-ms": 1600000000000,
+        "last-column-id": 2,
+        "schemas": [
+            {
+                "schema-id": 1,
+                "type": "struct",
+                "fields": [
+                    {"id": 1, "name": "id", "required": True, "type": "long"},
+                    {"id": 2, "name": "name", "required": False, "type": "string"},
+                ],
+            }
+        ],
+        "current-schema-id": 1,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0,
+        "last-partition-id": 1000,
+        "default-sort-order-id": 0,
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "properties": {},
+        "current-snapshot-id": -1,
+        "snapshots": [],
+        "snapshot-log": [],
+        "metadata-log": [],
+    }
+)
+
+
+def test_table_from_metadata_json_validation():
+    from pyiceberg_core.scan import Table
+
+    # 1. Test metadata JSON validation error
+    with pytest.raises(ValueError, match="Failed to parse metadata JSON"):
+        Table.from_metadata_json(FileIO.from_props({}), ["ns", "tbl"], "{invalid_json}")
+
+    # 2. Test invalid identifier (empty sequence)
+    with pytest.raises(ValueError, match="Table identifier can't be empty"):
+        Table.from_metadata_json(FileIO.from_props({}), [], TABLE_METADATA_JSON)
+
+
+def test_table_empty_table_planning():
+    from pyiceberg_core.scan import Table
+
+    # 3. Test successful parsing and empty table planning
+    table = Table.from_metadata_json(
+        FileIO.from_props({}),
+        ["ns", "tbl"],
+        TABLE_METADATA_JSON,
+    )
+
+    # 4. Test planning files on empty table returns empty list
+    tasks = table.plan_files()
+    assert isinstance(tasks, list)
+    assert len(tasks) == 0
+
+    # 5. Test selected field planning works (does not raise error)
+    tasks_projected = table.plan_files(selected_fields=["id"])
+    assert len(tasks_projected) == 0
+
+    tasks_empty = table.plan_files(selected_fields=[])
+    assert len(tasks_empty) == 0
+
+    # 6. Test predicate argument acceptance
+    from pyiceberg_core.expression import Reference
+
+    tasks_pred = table.plan_files(predicate=Reference("id").eq(5))
+    assert len(tasks_pred) == 0
