@@ -890,13 +890,15 @@ impl PyTable {
 
         let scan = scan_builder.build().map_err(crate::error::to_py_err)?;
 
-        let task_stream = runtime()
-            .block_on(async { scan.plan_files().await })
-            .map_err(crate::error::to_py_err)?;
+        let rust_tasks = py.detach(|| {
+            let task_stream = runtime()
+                .block_on(async { scan.plan_files().await })
+                .map_err(crate::error::to_py_err)?;
 
-        let rust_tasks = runtime()
-            .block_on(async { task_stream.try_collect::<Vec<FileScanTask>>().await })
-            .map_err(crate::error::to_py_err)?;
+            runtime()
+                .block_on(async { task_stream.try_collect::<Vec<FileScanTask>>().await })
+                .map_err(crate::error::to_py_err)
+        })?;
 
         validate_reader_projection(output_schema, &rust_tasks)?;
         let schema = arrow_schema_for_reader(output_schema, &rust_tasks)?;
