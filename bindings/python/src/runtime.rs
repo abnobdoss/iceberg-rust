@@ -30,3 +30,13 @@ pub fn runtime() -> Handle {
         }
     }
 }
+
+pub fn iceberg_runtime() -> iceberg::Runtime {
+    match Handle::try_current() {
+        Ok(_) => iceberg::Runtime::current(),
+        _ => {
+            let rt = RUNTIME.get_or_init(|| Runtime::new().unwrap());
+            iceberg::Runtime::new(rt)
+        }
+    }
+}

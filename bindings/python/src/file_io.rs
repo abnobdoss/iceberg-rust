@@ -39,7 +39,7 @@ fn is_sensitive_key(key: &str) -> bool {
 #[pyclass(name = "FileIO", module = "pyiceberg_core.file_io", skip_from_py_object)]
 #[derive(Clone)]
 pub struct PyFileIO {
-    inner: FileIO,
+    pub(crate) inner: FileIO,
     props: HashMap<String, String>,
 }
 
