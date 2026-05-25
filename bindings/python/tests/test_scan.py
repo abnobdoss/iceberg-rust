@@ -335,7 +335,7 @@ def test_arrow_reader_rejects_output_schema_that_does_not_match_task_projection(
     assert isinstance(projected_reader, pa.RecordBatchReader)
 
 
-def test_arrow_reader_rejects_metadata_projection_until_exact_reader_schema_is_exported():
+def test_arrow_reader_metadata_projection_no_longer_fails():
     reader = ArrowReader(FileIO.from_props({}))
     task = FileScanTask(
         schema(),
@@ -344,11 +344,22 @@ def test_arrow_reader_rejects_metadata_projection_until_exact_reader_schema_is_e
         [1, 2147483646],
     )
 
-    with pytest.raises(ValueError, match="metadata field projections"):
-        reader.read(id_file_schema(), [task])
+    projected_reader = reader.read(id_file_schema(), [task])
+    assert isinstance(projected_reader, pa.RecordBatchReader)
+    assert projected_reader.schema.names == ["id", "_file"]
+    
+    file_field = projected_reader.schema.field("_file")
+    assert "run_end_encoded" in str(file_field.type) or pa.types.is_run_end_encoded(file_field.type)
 
 
-def test_arrow_reader_rejects_partition_data_until_exact_reader_schema_is_exported():
+def test_arrow_reader_rejects_empty_metadata_projection_without_task_schema():
+    reader = ArrowReader(FileIO.from_props({}))
+
+    with pytest.raises(ValueError, match="cannot infer the exact Arrow schema"):
+        reader.read(id_file_schema(), [])
+
+
+def test_arrow_reader_partition_projection_no_longer_fails():
     partition_spec = json.dumps(
         {
             "spec-id": 1,
@@ -372,5 +383,43 @@ def test_arrow_reader_rejects_partition_data_until_exact_reader_schema_is_export
         partition_spec=partition_spec,
     )
 
-    with pytest.raises(ValueError, match="partition data projections"):
-        reader.read(id_schema(), [task])
+    projected_reader = reader.read(id_schema(), [task])
+    assert isinstance(projected_reader, pa.RecordBatchReader)
+    assert projected_reader.schema.names == ["id"]
+    
+    id_field = projected_reader.schema.field("id")
+    assert "run_end_encoded" in str(id_field.type) or pa.types.is_run_end_encoded(id_field.type)
+
+
+def test_arrow_reader_rejects_tasks_with_different_physical_schemas():
+    partition_spec = json.dumps(
+        {
+            "spec-id": 1,
+            "fields": [
+                {
+                    "source-id": 1,
+                    "field-id": 1000,
+                    "name": "id",
+                    "transform": "identity",
+                }
+            ],
+        }
+    )
+    reader = ArrowReader(FileIO.from_props({}))
+    constant_task = FileScanTask(
+        schema(),
+        "s3://bucket/partitioned.parquet",
+        1024,
+        [1],
+        partition_data=[7],
+        partition_spec=partition_spec,
+    )
+    plain_task = FileScanTask(
+        schema(),
+        "s3://bucket/plain.parquet",
+        1024,
+        [1],
+    )
+
+    with pytest.raises(ValueError, match="same Arrow schema"):
+        reader.read(id_schema(), [constant_task, plain_task])
