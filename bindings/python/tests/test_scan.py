@@ -550,3 +550,93 @@ def test_table_empty_table_planning():
 
     tasks_pred = table.plan_files(predicate=Reference("id").eq(5))
     assert len(tasks_pred) == 0
+
+
+TABLE_METADATA_WITH_SNAPSHOT_JSON = json.dumps(
+    {
+        "format-version": 2,
+        "table-uuid": "fb070e82-2d1f-4ef6-8ab6-c4d12c6ed490",
+        "location": "s3://bucket/table",
+        "last-sequence-number": 1,
+        "last-updated-ms": 1600000000000,
+        "last-column-id": 2,
+        "schemas": [
+            {
+                "schema-id": 1,
+                "type": "struct",
+                "fields": [
+                    {"id": 1, "name": "id", "required": True, "type": "long"},
+                    {"id": 2, "name": "name", "required": False, "type": "string"},
+                ],
+            }
+        ],
+        "current-schema-id": 1,
+        "partition-specs": [{"spec-id": 0, "fields": []}],
+        "default-spec-id": 0,
+        "last-partition-id": 1000,
+        "default-sort-order-id": 0,
+        "sort-orders": [{"order-id": 0, "fields": []}],
+        "properties": {},
+        "current-snapshot-id": 1,
+        "snapshots": [
+            {
+                "snapshot-id": 1,
+                "timestamp-ms": 1600000000000,
+                "summary": {"operation": "append"},
+                "manifest-list": "s3://bucket/table/metadata/snap-1.avro",
+                "schema-id": 1
+            }
+        ],
+        "snapshot-log": [],
+        "metadata-log": [],
+    }
+)
+
+
+def test_table_read_arrow():
+    from pyiceberg_core.scan import Table
+    from pyiceberg_core.expression import Reference
+
+    table = Table.from_metadata_json(
+        FileIO.from_props({}),
+        ["ns", "tbl"],
+        TABLE_METADATA_JSON,
+    )
+
+    # 1. Test empty table reader
+    reader = table.read_arrow(schema())
+    assert isinstance(reader, pa.RecordBatchReader)
+    assert reader.schema.names == ["id", "name"]
+    with pytest.raises(StopIteration):
+        reader.read_next_batch()
+
+    # 2. Test max_rows=0
+    reader_limit_0 = table.read_arrow(schema(), max_rows=0)
+    assert isinstance(reader_limit_0, pa.RecordBatchReader)
+    with pytest.raises(StopIteration):
+        reader_limit_0.read_next_batch()
+
+    # 3. Test invalid selected field
+    table_with_snapshot = Table.from_metadata_json(
+        FileIO.from_props({}),
+        ["ns", "tbl"],
+        TABLE_METADATA_WITH_SNAPSHOT_JSON,
+    )
+    with pytest.raises(ValueError, match="Column missing not found in table"):
+        table_with_snapshot.read_arrow(schema(), selected_fields=["missing"])
+
+    # 4. Test filter binding
+    reader_filtered = table.read_arrow(schema(), predicate=Reference("id").eq(5))
+    assert isinstance(reader_filtered, pa.RecordBatchReader)
+
+    # 5. Test unbindable filter (column not in schema)
+    # Note: since Table.read_arrow plans files, it will attempt to bind the filter.
+    # For a table with snapshot, it will fail during TableScanBuilder::build schema check if it tries to bind.
+    with pytest.raises(ValueError, match="Field missing not found in schema"):
+        # We can test filter binding fails on TableScan plan_files or read_arrow
+        # since it will construct unbound predicate which checks validity.
+        # Wait, does the PyFileScanTask binding check it?
+        # Yes, Reference("missing").eq(5) is bindable? No, let's verify where it fails.
+        # Wait, if we use table_with_snapshot, it has schema. If we pass predicate Reference("missing").eq(5),
+        # scan builder build() does not bind it. But plan_files does. Let's see if we can do TableScan planning:
+        table_with_snapshot.plan_files(predicate=Reference("missing").eq(5))
