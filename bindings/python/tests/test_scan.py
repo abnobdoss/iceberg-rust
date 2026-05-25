@@ -383,3 +383,55 @@ def test_arrow_reader_partition_projection_no_longer_fails():
     id_field = projected_reader.schema.field("id")
     assert "run_end_encoded" in str(id_field.type) or pa.types.is_run_end_encoded(id_field.type)
 
+
+def test_arrow_reader_max_rows_behavior():
+    reader = ArrowReader(FileIO.from_props({}))
+    
+    # max_rows=0
+    batch_reader = reader.read(id_schema(), [], max_rows=0)
+    assert isinstance(batch_reader, pa.RecordBatchReader)
+    assert batch_reader.schema.names == ["id"]
+    with pytest.raises(StopIteration):
+        batch_reader.read_next_batch()
+
+    # max_rows=None
+    batch_reader_none = reader.read(id_schema(), [], max_rows=None)
+    assert isinstance(batch_reader_none, pa.RecordBatchReader)
+    assert batch_reader_none.schema.names == ["id"]
+    with pytest.raises(StopIteration):
+        batch_reader_none.read_next_batch()
+
+
+def test_arrow_reader_with_real_parquet_and_limits(tmp_path):
+    import os
+    import pyarrow.parquet as pq
+    # Write a small parquet file with 5 rows
+    table = pa.table({"id": [1, 2, 3, 4, 5], "name": ["a", "b", "c", "d", "e"]})
+    local_path = str(tmp_path / "data.parquet")
+    pq.write_table(table, local_path)
+    file_path = "file://" + local_path
+    file_size = os.path.getsize(local_path)
+
+    reader = ArrowReader(FileIO.from_props({}))
+    
+    # 1. Test reading all
+    task = FileScanTask(schema(), file_path, file_size, [1, 2])
+    batch_reader = reader.read(schema(), [task])
+    res_table = batch_reader.read_all()
+    assert len(res_table) == 5
+    assert res_table.column("id").to_pylist() == [1, 2, 3, 4, 5]
+
+    # 2. Test max_rows = 3
+    task_limit = FileScanTask(schema(), file_path, file_size, [1, 2])
+    batch_reader_limit = reader.read(schema(), [task_limit], max_rows=3)
+    res_table_limit = batch_reader_limit.read_all()
+    assert len(res_table_limit) == 3
+    assert res_table_limit.column("id").to_pylist() == [1, 2, 3]
+
+    # 3. Test max_rows = 0
+    task_limit_0 = FileScanTask(schema(), file_path, file_size, [1, 2])
+    batch_reader_limit_0 = reader.read(schema(), [task_limit_0], max_rows=0)
+    res_table_limit_0 = batch_reader_limit_0.read_all()
+    assert len(res_table_limit_0) == 0
+
+
