@@ -24,6 +24,7 @@ mod expression;
 mod file_io;
 mod manifest;
 mod runtime;
+mod scan;
 mod schema;
 mod transform;
 
@@ -35,5 +36,6 @@ fn pyiceberg_core_rust(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     expression::register_module(py, m)?;
     file_io::register_module(py, m)?;
     schema::register_module(py, m)?;
+    scan::register_module(py, m)?;
     Ok(())
 }
