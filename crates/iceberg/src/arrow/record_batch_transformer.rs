@@ -29,7 +29,8 @@ use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
 use crate::arrow::value::{create_primitive_array_repeated, create_primitive_array_single_element};
 use crate::arrow::{datum_to_arrow_type_with_ree, schema_to_arrow_schema};
-use crate::metadata_columns::get_metadata_field;
+use crate::metadata_columns::{get_metadata_field, RESERVED_FIELD_ID_FILE};
+use crate::scan::FileScanTask;
 use crate::spec::{
     Datum, Literal, PartitionSpec, PrimitiveLiteral, Schema as IcebergSchema, Struct, Transform,
 };
@@ -189,14 +190,15 @@ enum SchemaComparison {
 /// Constant fields are pre-computed for both virtual/metadata fields (like _file) and
 /// identity-partitioned fields to avoid duplicate work during batch processing.
 #[derive(Debug)]
-pub(crate) struct RecordBatchTransformerBuilder {
+pub struct RecordBatchTransformerBuilder {
     snapshot_schema: Arc<IcebergSchema>,
     projected_iceberg_field_ids: Vec<i32>,
     constant_fields: HashMap<i32, Datum>,
 }
 
 impl RecordBatchTransformerBuilder {
-    pub(crate) fn new(
+    /// Create a new RecordBatchTransformerBuilder with snapshot schema and projected field IDs.
+    pub fn new(
         snapshot_schema: Arc<IcebergSchema>,
         projected_iceberg_field_ids: &[i32],
     ) -> Self {
@@ -213,7 +215,7 @@ impl RecordBatchTransformerBuilder {
     /// # Arguments
     /// * `field_id` - The field ID to associate with the constant
     /// * `datum` - The constant value (with type) for this field
-    pub(crate) fn with_constant(mut self, field_id: i32, datum: Datum) -> Self {
+    pub fn with_constant(mut self, field_id: i32, datum: Datum) -> Self {
         self.constant_fields.insert(field_id, datum);
         self
     }
@@ -223,7 +225,7 @@ impl RecordBatchTransformerBuilder {
     /// Both partition_spec and partition_data must be provided together since the spec defines
     /// which fields are identity-partitioned, and the data provides their constant values.
     /// This method computes the partition constants and merges them into constant_fields.
-    pub(crate) fn with_partition(
+    pub fn with_partition(
         mut self,
         partition_spec: Arc<PartitionSpec>,
         partition_data: Struct,
@@ -240,7 +242,59 @@ impl RecordBatchTransformerBuilder {
         Ok(self)
     }
 
-    pub(crate) fn build(self) -> RecordBatchTransformer {
+    /// Return the target schema computed from the snapshot schema, projected field IDs, and constants.
+    pub fn target_schema(&self) -> Result<ArrowSchemaRef> {
+        let mapped_unprojected_arrow_schema = Arc::new(schema_to_arrow_schema(&self.snapshot_schema)?);
+        let field_id_to_mapped_schema_map =
+            RecordBatchTransformer::build_field_id_to_arrow_schema_map(&mapped_unprojected_arrow_schema)?;
+
+        let fields: Result<Vec<_>> = self.projected_iceberg_field_ids
+            .iter()
+            .map(|field_id| {
+                if self.constant_fields.contains_key(field_id) {
+                    if let Ok(iceberg_field) = get_metadata_field(*field_id) {
+                        let datum = self.constant_fields.get(field_id).ok_or_else(|| Error::new(
+                            ErrorKind::Unexpected,
+                            "constant field not found",
+                        ))?;
+                        let arrow_type = datum_to_arrow_type_with_ree(datum);
+                        let arrow_field =
+                            Field::new(&iceberg_field.name, arrow_type, !iceberg_field.required)
+                                .with_metadata(HashMap::from([(
+                                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                                    iceberg_field.id.to_string(),
+                                )]));
+                        Ok(Arc::new(arrow_field))
+                    } else {
+                        let field = &field_id_to_mapped_schema_map
+                            .get(field_id)
+                            .ok_or_else(|| Error::new(ErrorKind::Unexpected, "field not found"))?
+                            .0;
+                        let datum = self.constant_fields.get(field_id).ok_or_else(|| Error::new(
+                            ErrorKind::Unexpected,
+                            "constant field not found",
+                        ))?;
+                        let arrow_type = datum_to_arrow_type_with_ree(datum);
+                        let constant_field =
+                            Field::new(field.name(), arrow_type, field.is_nullable())
+                                .with_metadata(field.metadata().clone());
+                        Ok(Arc::new(constant_field))
+                    }
+                } else {
+                    Ok(field_id_to_mapped_schema_map
+                        .get(field_id)
+                        .ok_or_else(|| Error::new(ErrorKind::Unexpected, "field not found"))?
+                        .0
+                        .clone())
+                }
+            })
+            .collect();
+
+        Ok(Arc::new(ArrowSchema::new(fields?)))
+    }
+
+    /// Build the RecordBatchTransformer.
+    pub fn build(self) -> RecordBatchTransformer {
         RecordBatchTransformer {
             snapshot_schema: self.snapshot_schema,
             projected_iceberg_field_ids: self.projected_iceberg_field_ids,
@@ -281,7 +335,7 @@ impl RecordBatchTransformerBuilder {
 /// - Java: parquet/src/main/java/org/apache/iceberg/parquet/ReadConf.java (field ID resolution)
 /// - Java: core/src/main/java/org/apache/iceberg/util/PartitionUtil.java (partition constants)
 #[derive(Debug)]
-pub(crate) struct RecordBatchTransformer {
+pub struct RecordBatchTransformer {
     snapshot_schema: Arc<IcebergSchema>,
     projected_iceberg_field_ids: Vec<i32>,
     // Pre-computed constant field information: field_id -> Datum
@@ -295,6 +349,24 @@ pub(crate) struct RecordBatchTransformer {
 }
 
 impl RecordBatchTransformer {
+    /// Builds the target Arrow schema for a FileScanTask.
+    pub fn arrow_schema_for_task(task: &FileScanTask) -> Result<ArrowSchemaRef> {
+        let mut builder = RecordBatchTransformerBuilder::new(task.schema_ref(), task.project_field_ids());
+        
+        if task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
+            let file_datum = Datum::string(task.data_file_path.clone());
+            builder = builder.with_constant(RESERVED_FIELD_ID_FILE, file_datum);
+        }
+        
+        if let (Some(partition_spec), Some(partition_data)) =
+            (task.partition_spec.clone(), task.partition.clone())
+        {
+            builder = builder.with_partition(partition_spec, partition_data)?;
+        }
+        
+        builder.target_schema()
+    }
+
     pub(crate) fn process_record_batch(
         &mut self,
         record_batch: RecordBatch,

@@ -23,8 +23,8 @@ use arrow::pyarrow::IntoPyArrow;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use futures::{StreamExt, stream};
 use iceberg::arrow::{ArrowReaderBuilder, schema_to_arrow_schema};
+use iceberg::arrow::record_batch_transformer::RecordBatchTransformer;
 use iceberg::expr::Bind;
-use iceberg::metadata_columns::is_metadata_field;
 use iceberg::scan::{
     ArrowRecordBatchStream, FileScanTask, FileScanTaskDeleteFile, FileScanTaskStream,
 };
@@ -293,31 +293,7 @@ fn schema_top_level_field_ids(schema: &PySchema) -> Vec<i32> {
 
 fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) -> PyResult<()> {
     let output_field_ids = schema_top_level_field_ids(output_schema);
-    if let Some(field_id) = output_field_ids
-        .iter()
-        .copied()
-        .find(|id| is_metadata_field(*id))
-    {
-        return Err(PyValueError::new_err(format!(
-            "ArrowReader does not yet support metadata field projections; field id {field_id} requires the reader-produced Arrow schema"
-        )));
-    }
     for task in tasks {
-        if task.partition.is_some() {
-            return Err(PyValueError::new_err(
-                "ArrowReader does not yet support partition data projections; partition constants require the reader-produced Arrow schema",
-            ));
-        }
-        if let Some(field_id) = task
-            .project_field_ids
-            .iter()
-            .copied()
-            .find(|id| is_metadata_field(*id))
-        {
-            return Err(PyValueError::new_err(format!(
-                "ArrowReader does not yet support metadata field projections; field id {field_id} requires the reader-produced Arrow schema"
-            )));
-        }
         if task.project_field_ids != output_field_ids {
             return Err(PyValueError::new_err(format!(
                 "output_schema field ids {:?} must match task project_field_ids {:?} for {}; pass the projected schema used to build the tasks",
@@ -621,6 +597,14 @@ impl PyArrowReader {
     ) -> PyResult<Bound<'py, PyAny>> {
         let rust_tasks = py_tasks_to_rust(tasks)?;
         validate_reader_projection(output_schema, &rust_tasks)?;
+        let schema = if let Some(first_task) = rust_tasks.first() {
+            RecordBatchTransformer::arrow_schema_for_task(first_task).map_err(crate::error::to_py_err)?
+        } else {
+            Arc::new(
+                schema_to_arrow_schema(output_schema.inner.as_ref())
+                    .map_err(crate::error::to_py_err)?,
+            )
+        };
         let task_stream =
             Box::pin(stream::iter(rust_tasks.into_iter().map(Ok))) as FileScanTaskStream;
 
@@ -639,10 +623,6 @@ impl PyArrowReader {
             .read(task_stream)
             .map_err(crate::error::to_py_err)?
             .stream();
-        let schema = Arc::new(
-            schema_to_arrow_schema(output_schema.inner.as_ref())
-                .map_err(crate::error::to_py_err)?,
-        );
         let reader: Box<dyn RecordBatchReader + Send> =
             Box::new(BlockingArrowRecordBatchReader { schema, stream });
 

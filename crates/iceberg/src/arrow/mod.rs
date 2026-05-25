@@ -31,7 +31,8 @@ mod int96;
 mod reader;
 /// RecordBatch projection utilities
 pub mod record_batch_projector;
-pub(crate) mod record_batch_transformer;
+/// RecordBatch transformer utilities for schema projection and constants
+pub mod record_batch_transformer;
 mod scan_metrics;
 mod value;
 
