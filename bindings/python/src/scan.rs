@@ -565,15 +565,38 @@ impl PyFileScanTask {
 struct BlockingArrowRecordBatchReader {
     schema: ArrowSchemaRef,
     stream: ArrowRecordBatchStream,
+    remaining_rows: Option<usize>,
 }
 
 impl Iterator for BlockingArrowRecordBatchReader {
     type Item = ArrowResult<RecordBatch>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        runtime()
-            .block_on(self.stream.next())
-            .map(|result| result.map_err(|err| ArrowError::ExternalError(Box::new(err))))
+        if let Some(0) = self.remaining_rows {
+            return None;
+        }
+
+        let batch = runtime()
+            .block_on(self.stream.next())?
+            .map_err(|err| ArrowError::ExternalError(Box::new(err)));
+
+        match batch {
+            Ok(batch) => {
+                if let Some(rem) = self.remaining_rows {
+                    if batch.num_rows() <= rem {
+                        self.remaining_rows = Some(rem - batch.num_rows());
+                        Some(Ok(batch))
+                    } else {
+                        let sliced = batch.slice(0, rem);
+                        self.remaining_rows = Some(0);
+                        Some(Ok(sliced))
+                    }
+                } else {
+                    Some(Ok(batch))
+                }
+            }
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -623,11 +646,13 @@ impl PyArrowReader {
         }
     }
 
+    #[pyo3(signature = (output_schema, tasks, *, max_rows = None))]
     fn read<'py>(
         &self,
         py: Python<'py>,
         output_schema: &PySchema,
         tasks: &Bound<'_, PyAny>,
+        max_rows: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let rust_tasks = py_tasks_to_rust(tasks)?;
         validate_reader_projection(output_schema, &rust_tasks)?;
@@ -651,7 +676,11 @@ impl PyArrowReader {
             .map_err(crate::error::to_py_err)?
             .stream();
         let reader: Box<dyn RecordBatchReader + Send> =
-            Box::new(BlockingArrowRecordBatchReader { schema, stream });
+            Box::new(BlockingArrowRecordBatchReader {
+                schema,
+                stream,
+                remaining_rows: max_rows,
+            });
 
         reader.into_pyarrow(py)
     }
