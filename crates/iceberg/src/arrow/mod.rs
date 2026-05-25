@@ -44,3 +44,10 @@ pub use partition_value_calculator::*;
 /// Record batch partition splitter for partitioned tables
 pub mod record_batch_partition_splitter;
 pub use record_batch_partition_splitter::*;
+
+/// Build the Arrow schema emitted by a file scan task after projection and constants.
+pub fn arrow_schema_for_file_scan_task(
+    task: &crate::scan::FileScanTask,
+) -> crate::Result<arrow_schema::SchemaRef> {
+    record_batch_transformer::RecordBatchTransformer::arrow_schema_for_task(task)
+}

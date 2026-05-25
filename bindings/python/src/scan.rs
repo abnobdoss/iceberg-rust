@@ -22,7 +22,7 @@ use arrow::error::{ArrowError, Result as ArrowResult};
 use arrow::pyarrow::IntoPyArrow;
 use arrow::record_batch::{RecordBatch, RecordBatchReader};
 use futures::{StreamExt, stream};
-use iceberg::arrow::{ArrowReaderBuilder, schema_to_arrow_schema};
+use iceberg::arrow::{ArrowReaderBuilder, arrow_schema_for_file_scan_task, schema_to_arrow_schema};
 use iceberg::expr::Bind;
 use iceberg::metadata_columns::is_metadata_field;
 use iceberg::scan::{
@@ -293,31 +293,7 @@ fn schema_top_level_field_ids(schema: &PySchema) -> Vec<i32> {
 
 fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) -> PyResult<()> {
     let output_field_ids = schema_top_level_field_ids(output_schema);
-    if let Some(field_id) = output_field_ids
-        .iter()
-        .copied()
-        .find(|id| is_metadata_field(*id))
-    {
-        return Err(PyValueError::new_err(format!(
-            "ArrowReader does not yet support metadata field projections; field id {field_id} requires the reader-produced Arrow schema"
-        )));
-    }
     for task in tasks {
-        if task.partition.is_some() {
-            return Err(PyValueError::new_err(
-                "ArrowReader does not yet support partition data projections; partition constants require the reader-produced Arrow schema",
-            ));
-        }
-        if let Some(field_id) = task
-            .project_field_ids
-            .iter()
-            .copied()
-            .find(|id| is_metadata_field(*id))
-        {
-            return Err(PyValueError::new_err(format!(
-                "ArrowReader does not yet support metadata field projections; field id {field_id} requires the reader-produced Arrow schema"
-            )));
-        }
         if task.project_field_ids != output_field_ids {
             return Err(PyValueError::new_err(format!(
                 "output_schema field ids {:?} must match task project_field_ids {:?} for {}; pass the projected schema used to build the tasks",
@@ -326,6 +302,40 @@ fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) 
         }
     }
     Ok(())
+}
+
+fn arrow_schema_for_reader(
+    output_schema: &PySchema,
+    tasks: &[FileScanTask],
+) -> PyResult<ArrowSchemaRef> {
+    let Some((first_task, rest)) = tasks.split_first() else {
+        let output_field_ids = schema_top_level_field_ids(output_schema);
+        if let Some(field_id) = output_field_ids
+            .iter()
+            .copied()
+            .find(|id| is_metadata_field(*id))
+        {
+            return Err(PyValueError::new_err(format!(
+                "ArrowReader cannot infer the exact Arrow schema for metadata field id {field_id} without scan tasks"
+            )));
+        }
+        return Ok(Arc::new(
+            schema_to_arrow_schema(output_schema.inner.as_ref())
+                .map_err(crate::error::to_py_err)?,
+        ));
+    };
+
+    let schema = arrow_schema_for_file_scan_task(first_task).map_err(crate::error::to_py_err)?;
+    for task in rest {
+        let task_schema = arrow_schema_for_file_scan_task(task).map_err(crate::error::to_py_err)?;
+        if task_schema.as_ref() != schema.as_ref() {
+            return Err(PyValueError::new_err(format!(
+                "all scan tasks must produce the same Arrow schema for pyarrow export; {} differs from {}",
+                task.data_file_path, first_task.data_file_path
+            )));
+        }
+    }
+    Ok(schema)
 }
 
 #[pyclass(
@@ -621,6 +631,7 @@ impl PyArrowReader {
     ) -> PyResult<Bound<'py, PyAny>> {
         let rust_tasks = py_tasks_to_rust(tasks)?;
         validate_reader_projection(output_schema, &rust_tasks)?;
+        let schema = arrow_schema_for_reader(output_schema, &rust_tasks)?;
         let task_stream =
             Box::pin(stream::iter(rust_tasks.into_iter().map(Ok))) as FileScanTaskStream;
 
@@ -639,10 +650,6 @@ impl PyArrowReader {
             .read(task_stream)
             .map_err(crate::error::to_py_err)?
             .stream();
-        let schema = Arc::new(
-            schema_to_arrow_schema(output_schema.inner.as_ref())
-                .map_err(crate::error::to_py_err)?,
-        );
         let reader: Box<dyn RecordBatchReader + Send> =
             Box::new(BlockingArrowRecordBatchReader { schema, stream });
 

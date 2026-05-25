@@ -29,7 +29,8 @@ use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 
 use crate::arrow::value::{create_primitive_array_repeated, create_primitive_array_single_element};
 use crate::arrow::{datum_to_arrow_type_with_ree, schema_to_arrow_schema};
-use crate::metadata_columns::get_metadata_field;
+use crate::metadata_columns::{RESERVED_FIELD_ID_FILE, get_metadata_field};
+use crate::scan::FileScanTask;
 use crate::spec::{
     Datum, Literal, PartitionSpec, PrimitiveLiteral, Schema as IcebergSchema, Struct, Transform,
 };
@@ -53,7 +54,7 @@ fn constants_map(
     partition_spec: &PartitionSpec,
     partition_data: &Struct,
     schema: &IcebergSchema,
-) -> Result<HashMap<i32, Datum>> {
+) -> Result<HashMap<i32, Option<Datum>>> {
     let mut constants = HashMap::new();
 
     for (pos, field) in partition_spec.fields().iter().enumerate() {
@@ -83,15 +84,12 @@ fn constants_map(
             // Handle both None (null) and Some(Literal::Primitive) cases
             match &partition_data[pos] {
                 None => {
-                    // Skip null partition values - they will be resolved as null per Iceberg spec rule #4.
-                    // When a partition value is null, we don't add it to the constants map,
-                    // allowing downstream column resolution to handle it correctly.
-                    continue;
+                    constants.insert(field.source_id, None);
                 }
                 Some(Literal::Primitive(value)) => {
                     // Create a Datum from the primitive type and value
                     let datum = Datum::new(prim_type.clone(), value.clone());
-                    constants.insert(field.source_id, datum);
+                    constants.insert(field.source_id, Some(datum));
                 }
                 Some(literal) => {
                     return Err(Error::new(
@@ -192,7 +190,7 @@ enum SchemaComparison {
 pub(crate) struct RecordBatchTransformerBuilder {
     snapshot_schema: Arc<IcebergSchema>,
     projected_iceberg_field_ids: Vec<i32>,
-    constant_fields: HashMap<i32, Datum>,
+    constant_fields: HashMap<i32, Option<Datum>>,
 }
 
 impl RecordBatchTransformerBuilder {
@@ -214,7 +212,7 @@ impl RecordBatchTransformerBuilder {
     /// * `field_id` - The field ID to associate with the constant
     /// * `datum` - The constant value (with type) for this field
     pub(crate) fn with_constant(mut self, field_id: i32, datum: Datum) -> Self {
-        self.constant_fields.insert(field_id, datum);
+        self.constant_fields.insert(field_id, Some(datum));
         self
     }
 
@@ -238,6 +236,71 @@ impl RecordBatchTransformerBuilder {
         }
 
         Ok(self)
+    }
+
+    pub(crate) fn target_schema(&self) -> Result<ArrowSchemaRef> {
+        let mapped_unprojected_arrow_schema =
+            Arc::new(schema_to_arrow_schema(&self.snapshot_schema)?);
+        let field_id_to_mapped_schema_map =
+            RecordBatchTransformer::build_field_id_to_arrow_schema_map(
+                &mapped_unprojected_arrow_schema,
+            )?;
+
+        let fields: Result<Vec<_>> = self
+            .projected_iceberg_field_ids
+            .iter()
+            .map(|field_id| {
+                if self.constant_fields.contains_key(field_id) {
+                    if let Ok(iceberg_field) = get_metadata_field(*field_id) {
+                        let constant_value =
+                            self.constant_fields.get(field_id).ok_or_else(|| {
+                                Error::new(ErrorKind::Unexpected, "constant field not found")
+                            })?;
+                        let arrow_type = if let Some(datum) = constant_value {
+                            datum_to_arrow_type_with_ree(datum)
+                        } else {
+                            return Err(Error::new(
+                                ErrorKind::Unexpected,
+                                "metadata constant field cannot be null",
+                            ));
+                        };
+                        let arrow_field =
+                            Field::new(&iceberg_field.name, arrow_type, !iceberg_field.required)
+                                .with_metadata(HashMap::from([(
+                                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                                    iceberg_field.id.to_string(),
+                                )]));
+                        Ok(Arc::new(arrow_field))
+                    } else {
+                        let field = &field_id_to_mapped_schema_map
+                            .get(field_id)
+                            .ok_or_else(|| Error::new(ErrorKind::Unexpected, "field not found"))?
+                            .0;
+                        let constant_value =
+                            self.constant_fields.get(field_id).ok_or_else(|| {
+                                Error::new(ErrorKind::Unexpected, "constant field not found")
+                            })?;
+                        let arrow_type = RecordBatchTransformer::constant_arrow_type(
+                            *field_id,
+                            constant_value,
+                            &field_id_to_mapped_schema_map,
+                        )?;
+                        let constant_field =
+                            Field::new(field.name(), arrow_type, field.is_nullable())
+                                .with_metadata(field.metadata().clone());
+                        Ok(Arc::new(constant_field))
+                    }
+                } else {
+                    Ok(field_id_to_mapped_schema_map
+                        .get(field_id)
+                        .ok_or_else(|| Error::new(ErrorKind::Unexpected, "field not found"))?
+                        .0
+                        .clone())
+                }
+            })
+            .collect();
+
+        Ok(Arc::new(ArrowSchema::new(fields?)))
     }
 
     pub(crate) fn build(self) -> RecordBatchTransformer {
@@ -284,10 +347,10 @@ impl RecordBatchTransformerBuilder {
 pub(crate) struct RecordBatchTransformer {
     snapshot_schema: Arc<IcebergSchema>,
     projected_iceberg_field_ids: Vec<i32>,
-    // Pre-computed constant field information: field_id -> Datum
+    // Pre-computed constant field information: field_id -> optional Datum.
     // Includes both virtual/metadata fields (like _file) and identity-partitioned fields
-    // Datum holds both the Iceberg type and the value
-    constant_fields: HashMap<i32, Datum>,
+    // Datum holds both the Iceberg type and the value; None means a constant null.
+    constant_fields: HashMap<i32, Option<Datum>>,
 
     // BatchTransform gets lazily constructed based on the schema of
     // the first RecordBatch we receive from the file
@@ -295,6 +358,47 @@ pub(crate) struct RecordBatchTransformer {
 }
 
 impl RecordBatchTransformer {
+    fn run_end_encoded_type(values_type: DataType) -> DataType {
+        let run_ends_field = Arc::new(Field::new("run_ends", DataType::Int32, false));
+        let values_field = Arc::new(Field::new("values", values_type, true));
+        DataType::RunEndEncoded(run_ends_field, values_field)
+    }
+
+    fn constant_arrow_type(
+        field_id: i32,
+        constant_value: &Option<Datum>,
+        field_id_to_mapped_schema_map: &HashMap<i32, (FieldRef, usize)>,
+    ) -> Result<DataType> {
+        if let Some(datum) = constant_value {
+            return Ok(datum_to_arrow_type_with_ree(datum));
+        }
+
+        let field = field_id_to_mapped_schema_map
+            .get(&field_id)
+            .ok_or_else(|| Error::new(ErrorKind::Unexpected, "field not found"))?
+            .0
+            .clone();
+        Ok(Self::run_end_encoded_type(field.data_type().clone()))
+    }
+
+    pub(crate) fn arrow_schema_for_task(task: &FileScanTask) -> Result<ArrowSchemaRef> {
+        let mut builder =
+            RecordBatchTransformerBuilder::new(task.schema_ref(), task.project_field_ids());
+
+        if task.project_field_ids().contains(&RESERVED_FIELD_ID_FILE) {
+            let file_datum = Datum::string(task.data_file_path.clone());
+            builder = builder.with_constant(RESERVED_FIELD_ID_FILE, file_datum);
+        }
+
+        if let (Some(partition_spec), Some(partition_data)) =
+            (task.partition_spec.clone(), task.partition.clone())
+        {
+            builder = builder.with_partition(partition_spec, partition_data)?;
+        }
+
+        builder.target_schema()
+    }
+
     pub(crate) fn process_record_batch(
         &mut self,
         record_batch: RecordBatch,
@@ -310,7 +414,11 @@ impl RecordBatchTransformer {
                     .with_row_count(Some(record_batch.num_rows()));
                 RecordBatch::try_new_with_options(
                     Arc::clone(target_schema),
-                    self.transform_columns(record_batch.columns(), operations)?,
+                    self.transform_columns(
+                        record_batch.num_rows(),
+                        record_batch.columns(),
+                        operations,
+                    )?,
                     &options,
                 )?
             }
@@ -348,7 +456,7 @@ impl RecordBatchTransformer {
         source_schema: &ArrowSchemaRef,
         snapshot_schema: &IcebergSchema,
         projected_iceberg_field_ids: &[i32],
-        constant_fields: &HashMap<i32, Datum>,
+        constant_fields: &HashMap<i32, Option<Datum>>,
     ) -> Result<BatchTransform> {
         let mapped_unprojected_arrow_schema = Arc::new(schema_to_arrow_schema(snapshot_schema)?);
         let field_id_to_mapped_schema_map =
@@ -365,11 +473,18 @@ impl RecordBatchTransformer {
                     // For partition fields, get name from schema (they exist in schema)
                     if let Ok(iceberg_field) = get_metadata_field(*field_id) {
                         // This is a metadata/virtual field - convert Iceberg field to Arrow
-                        let datum = constant_fields.get(field_id).ok_or(Error::new(
+                        let constant_value = constant_fields.get(field_id).ok_or(Error::new(
                             ErrorKind::Unexpected,
                             "constant field not found",
                         ))?;
-                        let arrow_type = datum_to_arrow_type_with_ree(datum);
+                        let arrow_type = if let Some(datum) = constant_value {
+                            datum_to_arrow_type_with_ree(datum)
+                        } else {
+                            return Err(Error::new(
+                                ErrorKind::Unexpected,
+                                "metadata constant field cannot be null",
+                            ));
+                        };
                         let arrow_field =
                             Field::new(&iceberg_field.name, arrow_type, !iceberg_field.required)
                                 .with_metadata(HashMap::from([(
@@ -383,11 +498,15 @@ impl RecordBatchTransformer {
                             .get(field_id)
                             .ok_or(Error::new(ErrorKind::Unexpected, "field not found"))?
                             .0;
-                        let datum = constant_fields.get(field_id).ok_or(Error::new(
+                        let constant_value = constant_fields.get(field_id).ok_or(Error::new(
                             ErrorKind::Unexpected,
                             "constant field not found",
                         ))?;
-                        let arrow_type = datum_to_arrow_type_with_ree(datum);
+                        let arrow_type = Self::constant_arrow_type(
+                            *field_id,
+                            constant_value,
+                            &field_id_to_mapped_schema_map,
+                        )?;
                         // Use the type from constant_fields (REE for constants)
                         let constant_field =
                             Field::new(field.name(), arrow_type, field.is_nullable())
@@ -473,7 +592,7 @@ impl RecordBatchTransformer {
         snapshot_schema: &IcebergSchema,
         projected_iceberg_field_ids: &[i32],
         field_id_to_mapped_schema_map: HashMap<i32, (FieldRef, usize)>,
-        constant_fields: &HashMap<i32, Datum>,
+        constant_fields: &HashMap<i32, Option<Datum>>,
     ) -> Result<Vec<ColumnSource>> {
         let field_id_to_source_schema_map =
             Self::build_field_id_to_arrow_schema_map(source_schema)?;
@@ -485,10 +604,14 @@ impl RecordBatchTransformer {
                 // Constant fields always use their pre-computed constant values, regardless of whether
                 // they exist in the Parquet file. This is per Iceberg spec rule #1: partition metadata
                 // is authoritative and should be preferred over file data.
-                if let Some(datum) = constant_fields.get(field_id) {
-                    let arrow_type = datum_to_arrow_type_with_ree(datum);
+                if let Some(constant_value) = constant_fields.get(field_id) {
+                    let arrow_type = Self::constant_arrow_type(
+                        *field_id,
+                        constant_value,
+                        &field_id_to_mapped_schema_map,
+                    )?;
                     return Ok(ColumnSource::Add {
-                        value: Some(datum.literal().clone()),
+                        value: constant_value.as_ref().map(|datum| datum.literal().clone()),
                         target_type: arrow_type,
                     });
                 }
@@ -593,14 +716,10 @@ impl RecordBatchTransformer {
 
     fn transform_columns(
         &self,
+        num_rows: usize,
         columns: &[Arc<dyn ArrowArray>],
         operations: &[ColumnSource],
     ) -> Result<Vec<Arc<dyn ArrowArray>>> {
-        if columns.is_empty() {
-            return Ok(columns.to_vec());
-        }
-        let num_rows = columns[0].len();
-
         operations
             .iter()
             .map(|op| {
@@ -1669,10 +1788,14 @@ mod test {
             .unwrap();
         assert_eq!(id_col.values(), &[1, 2, 3]);
 
-        // Partition column with null value should produce nulls
+        // Partition column with null value should not pass through file data.
         let data_col = result.column(1);
-        assert!(data_col.is_null(0));
-        assert!(data_col.is_null(1));
-        assert!(data_col.is_null(2));
+        let data_col = data_col
+            .as_any()
+            .downcast_ref::<arrow_array::RunArray<arrow_array::types::Int32Type>>()
+            .unwrap();
+        assert_eq!(data_col.len(), 3);
+        assert_eq!(data_col.values().len(), 1);
+        assert!(data_col.values().is_null(0));
     }
 }

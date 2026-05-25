@@ -1352,6 +1352,15 @@ pub mod tests {
             tasks[1].data_file_path,
             format!("{}/3.parquet", &fixture.table_location)
         );
+
+        for task in tasks {
+            assert_eq!(
+                task.partition_spec
+                    .as_ref()
+                    .map(|partition_spec| partition_spec.spec_id()),
+                Some(0)
+            );
+        }
     }
 
     #[tokio::test]

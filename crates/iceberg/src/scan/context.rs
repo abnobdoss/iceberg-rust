@@ -28,8 +28,8 @@ use crate::scan::{
     PartitionFilterCache,
 };
 use crate::spec::{
-    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, SchemaRef, SnapshotRef,
-    TableMetadataRef,
+    ManifestContentType, ManifestEntryRef, ManifestFile, ManifestList, PartitionSpec, SchemaRef,
+    SnapshotRef, TableMetadataRef,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -44,6 +44,7 @@ pub(crate) struct ManifestFileContext {
     bound_predicates: Option<Arc<BoundPredicates>>,
     object_cache: Arc<ObjectCache>,
     snapshot_schema: SchemaRef,
+    partition_spec: Arc<PartitionSpec>,
     expression_evaluator_cache: Arc<ExpressionEvaluatorCache>,
     delete_file_index: DeleteFileIndex,
     case_sensitive: bool,
@@ -58,6 +59,7 @@ pub(crate) struct ManifestEntryContext {
     pub field_ids: Arc<Vec<i32>>,
     pub bound_predicates: Option<Arc<BoundPredicates>>,
     pub partition_spec_id: i32,
+    pub partition_spec: Arc<PartitionSpec>,
     pub snapshot_schema: SchemaRef,
     pub delete_file_index: DeleteFileIndex,
     pub case_sensitive: bool,
@@ -72,6 +74,7 @@ impl ManifestFileContext {
             manifest_file,
             bound_predicates,
             snapshot_schema,
+            partition_spec,
             field_ids,
             mut sender,
             expression_evaluator_cache,
@@ -90,6 +93,7 @@ impl ManifestFileContext {
                 partition_spec_id: manifest_file.partition_spec_id,
                 bound_predicates: bound_predicates.clone(),
                 snapshot_schema: snapshot_schema.clone(),
+                partition_spec: partition_spec.clone(),
                 delete_file_index: delete_file_index.clone(),
                 case_sensitive: self.case_sensitive,
             };
@@ -133,10 +137,8 @@ impl ManifestEntryContext {
 
             deletes,
 
-            // Include partition data and spec from manifest entry
             partition: Some(self.manifest_entry.data_file.partition.clone()),
-            // TODO: Pass actual PartitionSpec through context chain for native flow
-            partition_spec: None,
+            partition_spec: Some(self.partition_spec),
             // TODO: Extract name_mapping from table metadata property "schema.name-mapping.default"
             name_mapping: None,
             case_sensitive: self.case_sensitive,
@@ -241,8 +243,23 @@ impl PlanContext {
                 None
             };
 
+            let partition_spec = self
+                .table_metadata
+                .partition_spec_by_id(manifest_file.partition_spec_id)
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Unexpected,
+                        format!(
+                            "Could not find partition spec for id {}",
+                            manifest_file.partition_spec_id
+                        ),
+                    )
+                })?
+                .clone();
+
             let mfc = self.create_manifest_file_context(
                 manifest_file,
+                partition_spec,
                 partition_bound_predicate,
                 tx,
                 delete_file_idx.clone(),
@@ -257,6 +274,7 @@ impl PlanContext {
     fn create_manifest_file_context(
         &self,
         manifest_file: &ManifestFile,
+        partition_spec: Arc<PartitionSpec>,
         partition_filter: Option<Arc<BoundPredicate>>,
         sender: Sender<ManifestEntryContext>,
         delete_file_index: DeleteFileIndex,
@@ -279,6 +297,7 @@ impl PlanContext {
             sender,
             object_cache: self.object_cache.clone(),
             snapshot_schema: self.snapshot_schema.clone(),
+            partition_spec,
             field_ids: self.field_ids.clone(),
             expression_evaluator_cache: self.expression_evaluator_cache.clone(),
             delete_file_index,
