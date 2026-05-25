@@ -291,6 +291,16 @@ fn schema_top_level_field_ids(schema: &PySchema) -> Vec<i32> {
         .collect()
 }
 
+fn schema_top_level_field_names(schema: &PySchema) -> Vec<String> {
+    schema
+        .inner
+        .as_struct()
+        .fields()
+        .iter()
+        .map(|field| field.name.clone())
+        .collect()
+}
+
 fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) -> PyResult<()> {
     let output_field_ids = schema_top_level_field_ids(output_schema);
     for task in tasks {
@@ -300,6 +310,24 @@ fn validate_reader_projection(output_schema: &PySchema, tasks: &[FileScanTask]) 
                 output_field_ids, task.project_field_ids, task.data_file_path
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_selected_fields_match_output_schema(
+    output_schema: &PySchema,
+    selected_fields: Option<&[String]>,
+) -> PyResult<()> {
+    let Some(selected) = selected_fields else {
+        return Ok(());
+    };
+
+    let output_names = schema_top_level_field_names(output_schema);
+    if output_names != selected && selected.iter().all(|name| output_names.contains(name)) {
+        return Err(PyValueError::new_err(format!(
+            "output_schema columns {:?} must match selected_fields {:?}",
+            output_names, selected
+        )));
     }
     Ok(())
 }
@@ -845,6 +873,8 @@ impl PyTable {
     ) -> PyResult<Bound<'py, PyAny>> {
         let mut scan_builder = self.inner.scan();
 
+        validate_selected_fields_match_output_schema(output_schema, selected_fields.as_deref())?;
+
         if let Some(fields) = selected_fields {
             if fields.is_empty() {
                 scan_builder = scan_builder.select_empty();
@@ -874,10 +904,7 @@ impl PyTable {
             scan_builder = scan_builder.with_manifest_entry_concurrency_limit(limit);
         }
 
-        let mut df_concurrency = data_file_concurrency_limit;
-        if max_rows.is_some() && df_concurrency.is_none() {
-            df_concurrency = Some(1);
-        }
+        let df_concurrency = data_file_concurrency_limit;
         if let Some(limit) = df_concurrency {
             scan_builder = scan_builder.with_data_file_concurrency_limit(limit);
         }

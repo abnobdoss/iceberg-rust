@@ -610,6 +610,12 @@ def test_table_read_arrow():
     with pytest.raises(StopIteration):
         reader.read_next_batch()
 
+    reader_projected = table.read_arrow(id_schema(), selected_fields=["id"])
+    assert reader_projected.schema.names == ["id"]
+
+    with pytest.raises(ValueError, match="output_schema columns"):
+        table.read_arrow(schema(), selected_fields=["id"])
+
     # 2. Test max_rows=0
     reader_limit_0 = table.read_arrow(schema(), max_rows=0)
     assert isinstance(reader_limit_0, pa.RecordBatchReader)
@@ -630,13 +636,5 @@ def test_table_read_arrow():
     assert isinstance(reader_filtered, pa.RecordBatchReader)
 
     # 5. Test unbindable filter (column not in schema)
-    # Note: since Table.read_arrow plans files, it will attempt to bind the filter.
-    # For a table with snapshot, it will fail during TableScanBuilder::build schema check if it tries to bind.
     with pytest.raises(ValueError, match="Field missing not found in schema"):
-        # We can test filter binding fails on TableScan plan_files or read_arrow
-        # since it will construct unbound predicate which checks validity.
-        # Wait, does the PyFileScanTask binding check it?
-        # Yes, Reference("missing").eq(5) is bindable? No, let's verify where it fails.
-        # Wait, if we use table_with_snapshot, it has schema. If we pass predicate Reference("missing").eq(5),
-        # scan builder build() does not bind it. But plan_files does. Let's see if we can do TableScan planning:
         table_with_snapshot.plan_files(predicate=Reference("missing").eq(5))
