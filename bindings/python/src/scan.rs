@@ -753,6 +753,7 @@ impl PyTable {
     ))]
     fn plan_files(
         &self,
+        py: Python<'_>,
         selected_fields: Option<Vec<String>>,
         predicate: Option<&Bound<'_, PyPredicate>>,
         snapshot_id: Option<i64>,
@@ -793,13 +794,15 @@ impl PyTable {
 
         let scan = scan_builder.build().map_err(crate::error::to_py_err)?;
 
-        let task_stream = runtime()
-            .block_on(async { scan.plan_files().await })
-            .map_err(crate::error::to_py_err)?;
+        let tasks = py.detach(|| {
+            let task_stream = runtime()
+                .block_on(async { scan.plan_files().await })
+                .map_err(crate::error::to_py_err)?;
 
-        let tasks = runtime()
-            .block_on(async { task_stream.try_collect::<Vec<FileScanTask>>().await })
-            .map_err(crate::error::to_py_err)?;
+            runtime()
+                .block_on(async { task_stream.try_collect::<Vec<FileScanTask>>().await })
+                .map_err(crate::error::to_py_err)
+        })?;
 
         let py_tasks = tasks
             .into_iter()
