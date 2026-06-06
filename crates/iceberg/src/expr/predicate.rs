@@ -459,11 +459,17 @@ impl Bind for Predicate {
             }
             Predicate::Set(expr) => {
                 let bound_expr = expr.bind(schema, case_sensitive)?;
-                let bound_literals = bound_expr
+                let mut bound_literals = bound_expr
                     .literals
                     .into_iter()
                     .map(|l| l.to(&bound_expr.term.field().field_type))
                     .collect::<Result<FnvHashSet<Datum>>>()?;
+                bound_literals.retain(|literal| {
+                    !matches!(
+                        literal.literal(),
+                        PrimitiveLiteral::AboveMax | PrimitiveLiteral::BelowMin
+                    )
+                });
 
                 match &bound_expr.op {
                     &PredicateOperator::In => {
@@ -1801,5 +1807,51 @@ mod tests {
     #[test]
     fn test_bind_double_literal_against_float_column_fails() {
         assert_datum_bind_fails(PrimitiveType::Float, Datum::double(1.5));
+    }
+
+    #[test]
+    fn test_bind_int_overflow_binary_simplifies() {
+        let schema = schema_with_type(PrimitiveType::Int);
+
+        let above = Reference::new("c")
+            .equal_to(Datum::long(i64::MAX))
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(above, BoundPredicate::AlwaysFalse));
+
+        let below = Reference::new("c")
+            .not_equal_to(Datum::long(i64::MIN))
+            .bind(schema, true)
+            .unwrap();
+        assert!(matches!(below, BoundPredicate::AlwaysTrue));
+    }
+
+    #[test]
+    fn test_bind_int_overflow_set_simplifies() {
+        let schema = schema_with_type(PrimitiveType::Int);
+
+        let in_above = Reference::new("c")
+            .is_in([Datum::long(i64::MAX)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(in_above, BoundPredicate::AlwaysFalse));
+
+        let not_in_above = Reference::new("c")
+            .is_not_in([Datum::long(i64::MAX)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(not_in_above, BoundPredicate::AlwaysTrue));
+
+        let in_mixed = Reference::new("c")
+            .is_in([Datum::long(i64::MAX), Datum::long(5)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert_eq!(&format!("{in_mixed}"), "c = 5");
+
+        let not_in_mixed = Reference::new("c")
+            .is_not_in([Datum::long(i64::MIN), Datum::long(5)])
+            .bind(schema, true)
+            .unwrap();
+        assert_eq!(&format!("{not_in_mixed}"), "c != 5");
     }
 }
