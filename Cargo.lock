@@ -5921,6 +5921,7 @@ dependencies = [
  "iceberg-datafusion",
  "iceberg-storage-opendal",
  "pyo3",
+ "serde_json",
  "tokio",
 ]
 
