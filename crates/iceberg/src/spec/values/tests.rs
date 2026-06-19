@@ -1151,6 +1151,118 @@ fn test_datum_int_convert_to_date() {
 }
 
 #[test]
+fn test_datum_int_convert_to_float() {
+    let datum = Datum::int(34);
+
+    let result = datum.to(&Primitive(PrimitiveType::Float)).unwrap();
+
+    assert_eq!(result, Datum::float(34.0f32));
+}
+
+#[test]
+fn test_datum_int_convert_to_double() {
+    let datum = Datum::int(34);
+
+    let result = datum.to(&Primitive(PrimitiveType::Double)).unwrap();
+
+    assert_eq!(result, Datum::double(34.0f64));
+}
+
+#[test]
+fn test_datum_int_convert_to_decimal() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 4,
+        scale: 2,
+    });
+    let datum = Datum::int(34);
+
+    let result = datum.to(&target_type).unwrap();
+
+    assert_eq!(result.data_type(), &PrimitiveType::Decimal {
+        precision: 4,
+        scale: 2,
+    });
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(3400));
+}
+
+#[test]
+fn test_datum_date_convert_to_numeric_is_unsupported() {
+    // `date` is physically an `Int` literal; it must not flow through the
+    // integer numeric-widening routes. Java's `DateLiteral.to` only supports
+    // the `date` target.
+    let datum = Datum::date(19_000);
+    for target in [
+        PrimitiveType::Float,
+        PrimitiveType::Double,
+        PrimitiveType::Decimal {
+            precision: 9,
+            scale: 2,
+        },
+    ] {
+        let result = datum.clone().to(&Primitive(target.clone()));
+        assert!(
+            result.is_err(),
+            "{target:?}: expected error, got {result:?}"
+        );
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+    }
+}
+
+#[test]
+fn test_datum_timestamp_convert_to_numeric_is_unsupported() {
+    // `timestamp` is physically a `Long` literal; it must not flow through the
+    // long numeric-widening routes. Java's `TimestampLiteral.to` does not
+    // support numeric targets.
+    let datum = Datum::timestamp_micros(1_000_000);
+    for target in [
+        PrimitiveType::Float,
+        PrimitiveType::Double,
+        PrimitiveType::Decimal {
+            precision: 18,
+            scale: 0,
+        },
+    ] {
+        let result = datum.clone().to(&Primitive(target.clone()));
+        assert!(
+            result.is_err(),
+            "{target:?}: expected error, got {result:?}"
+        );
+        assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+    }
+}
+
+#[test]
+fn test_datum_double_convert_to_decimal_uses_half_up_rounding() {
+    // Lock in HALF_UP (away-from-zero) rounding to match Java's
+    // `BigDecimal.setScale(scale, RoundingMode.HALF_UP)`. A midpoint such as
+    // 0.125 -> scale 2 rounds to 0.13 under HALF_UP but 0.12 under banker's
+    // rounding, so this guards against a rounding-mode regression.
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 4,
+        scale: 2,
+    });
+    let result = Datum::double(0.125f64).to(&target_type).unwrap();
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(13));
+
+    let result = Datum::double(-0.125f64).to(&target_type).unwrap();
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(-13));
+}
+
+#[test]
+fn test_datum_int_convert_to_decimal_rejects_precision_too_narrow() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 2,
+        scale: 0,
+    });
+    let datum = Datum::int(100);
+
+    let result = datum.to(&target_type);
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
 fn test_datum_long_convert_to_date() {
     let datum = Datum::long(12345);
 
@@ -1252,6 +1364,55 @@ fn test_datum_long_convert_to_timestamptz() {
 }
 
 #[test]
+fn test_datum_long_convert_to_float() {
+    let datum = Datum::long(34);
+
+    let result = datum.to(&Primitive(PrimitiveType::Float)).unwrap();
+
+    assert_eq!(result, Datum::float(34.0f32));
+}
+
+#[test]
+fn test_datum_long_convert_to_double() {
+    let datum = Datum::long(34);
+
+    let result = datum.to(&Primitive(PrimitiveType::Double)).unwrap();
+
+    assert_eq!(result, Datum::double(34.0f64));
+}
+
+#[test]
+fn test_datum_long_convert_to_decimal() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 4,
+        scale: 1,
+    });
+    let datum = Datum::long(-34);
+
+    let result = datum.to(&target_type).unwrap();
+
+    assert_eq!(result.data_type(), &PrimitiveType::Decimal {
+        precision: 4,
+        scale: 1,
+    });
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(-340));
+}
+
+#[test]
+fn test_datum_long_convert_to_decimal_rejects_precision_too_narrow() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 38,
+        scale: 20,
+    });
+    let datum = Datum::long(LONG_MAX);
+
+    let result = datum.to(&target_type);
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
 fn test_datum_double_convert_to_float() {
     let datum = Datum::double(1.25f64);
     let result = datum.to(&Primitive(PrimitiveType::Float)).unwrap();
@@ -1317,6 +1478,99 @@ fn test_datum_double_convert_to_float_below_min() {
         result_underflow,
         Datum::new(PrimitiveType::Float, PrimitiveLiteral::BelowMin)
     );
+}
+
+#[test]
+fn test_datum_float_convert_to_double() {
+    let datum = Datum::float(1.25f32);
+
+    let result = datum.to(&Primitive(PrimitiveType::Double)).unwrap();
+
+    assert_eq!(result, Datum::double(1.25f64));
+}
+
+#[test]
+fn test_datum_float_convert_to_decimal() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 3,
+        scale: 1,
+    });
+    let datum = Datum::float(1.25f32);
+
+    let result = datum.to(&target_type).unwrap();
+
+    assert_eq!(result.data_type(), &PrimitiveType::Decimal {
+        precision: 3,
+        scale: 1,
+    });
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(13));
+}
+
+#[test]
+fn test_datum_double_convert_to_decimal() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 4,
+        scale: 2,
+    });
+    let datum = Datum::double(-1.255f64);
+
+    let result = datum.to(&target_type).unwrap();
+
+    assert_eq!(result.data_type(), &PrimitiveType::Decimal {
+        precision: 4,
+        scale: 2,
+    });
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(-126));
+}
+
+#[test]
+fn test_datum_double_convert_to_decimal_rejects_precision_too_narrow() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 3,
+        scale: 1,
+    });
+    let datum = Datum::double(999.95f64);
+
+    let result = datum.to(&target_type);
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_float_and_double_convert_to_decimal_rejects_non_finite() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 9,
+        scale: 2,
+    });
+
+    let result_float = Datum::float(f32::NAN).to(&target_type);
+    assert!(
+        result_float.is_err(),
+        "expect error but got {result_float:?}"
+    );
+    assert_eq!(result_float.unwrap_err().kind(), ErrorKind::DataInvalid);
+
+    let result_double = Datum::double(f64::INFINITY).to(&target_type);
+    assert!(
+        result_double.is_err(),
+        "expect error but got {result_double:?}"
+    );
+    assert_eq!(result_double.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_float_and_double_convert_to_int_or_long_is_unsupported() {
+    for datum in [Datum::float(1.25f32), Datum::double(1.25f64)] {
+        for target_type in [
+            Primitive(PrimitiveType::Int),
+            Primitive(PrimitiveType::Long),
+        ] {
+            let result = datum.clone().to(&target_type);
+            assert!(result.is_err(), "expect error but got {result:?}");
+            assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+        }
+    }
 }
 
 #[test]

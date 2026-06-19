@@ -30,7 +30,7 @@ use serde_bytes::ByteBuf;
 
 use super::decimal_utils::{
     Decimal, decimal_from_i128_with_scale, decimal_from_str_exact, decimal_mantissa,
-    decimal_precision, decimal_scale, i128_from_be_bytes, i128_to_be_bytes_min,
+    decimal_precision, decimal_rescale, decimal_scale, i128_from_be_bytes, i128_to_be_bytes_min,
 };
 use super::literal::Literal;
 use super::primitive::PrimitiveLiteral;
@@ -1109,6 +1109,39 @@ impl Datum {
         }
     }
 
+    fn i128_to_decimal(val: i128, precision: u32, scale: u32) -> Result<Datum> {
+        let multiplier = 10_i128.checked_pow(scale).ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Decimal scale {scale} is too large to represent."),
+            )
+        })?;
+        let mantissa = val.checked_mul(multiplier).ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Decimal value {val} is too large for scale {scale}."),
+            )
+        })?;
+
+        Datum::decimal_from_mantissa(mantissa, precision, scale)
+    }
+
+    /// Convert a floating literal through its canonical decimal string, then
+    /// rescale with the target decimal scale using `HalfUp` rounding.
+    fn f64_to_decimal(val: f64, precision: u32, scale: u32) -> Result<Datum> {
+        if !val.is_finite() {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!("Cannot convert non-finite floating value {val} to decimal."),
+            ));
+        }
+
+        let decimal = decimal_from_str_exact(&val.to_string())?;
+        let decimal = decimal_rescale(decimal, scale);
+
+        Datum::decimal_from_mantissa(decimal_mantissa(&decimal), precision, scale)
+    }
+
     fn string_to_i128<S: AsRef<str>>(s: S) -> Result<i128> {
         s.as_ref().parse::<i128>().map_err(|e| {
             Error::new(ErrorKind::DataInvalid, "Can't parse string to i128.").with_source(e)
@@ -1145,6 +1178,20 @@ impl Datum {
                     (PrimitiveLiteral::Int(val), _, PrimitiveType::Int) => Ok(Datum::int(*val)),
                     (PrimitiveLiteral::Int(val), _, PrimitiveType::Date) => Ok(Datum::date(*val)),
                     (PrimitiveLiteral::Int(val), _, PrimitiveType::Long) => Ok(Datum::long(*val)),
+                    // Numeric widening mirrors Java's `IntegerLiteral.to`. The
+                    // source type is pinned to `Int` so an `Int`-backed `date`
+                    // literal is not silently treated as an integer here.
+                    (PrimitiveLiteral::Int(val), PrimitiveType::Int, PrimitiveType::Float) => {
+                        Ok(Datum::float(*val as f32))
+                    }
+                    (PrimitiveLiteral::Int(val), PrimitiveType::Int, PrimitiveType::Double) => {
+                        Ok(Datum::double(*val as f64))
+                    }
+                    (
+                        PrimitiveLiteral::Int(val),
+                        PrimitiveType::Int,
+                        PrimitiveType::Decimal { precision, scale },
+                    ) => Datum::i128_to_decimal(*val as i128, *precision, *scale),
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Int) => {
                         Ok(Datum::i64_to_i32(*val))
                     }
@@ -1161,15 +1208,43 @@ impl Datum {
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Timestamptz) => {
                         Ok(Datum::timestamptz_micros(*val))
                     }
+                    // Numeric widening mirrors Java's `LongLiteral.to`. The source
+                    // type is pinned to `Long` so `Long`-backed temporal literals
+                    // (`time`, `timestamp`, ...) are not silently treated as plain
+                    // integers here.
+                    (PrimitiveLiteral::Long(val), PrimitiveType::Long, PrimitiveType::Float) => {
+                        Ok(Datum::float(*val as f32))
+                    }
+                    (PrimitiveLiteral::Long(val), PrimitiveType::Long, PrimitiveType::Double) => {
+                        Ok(Datum::double(*val as f64))
+                    }
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::Long,
+                        PrimitiveType::Decimal { precision, scale },
+                    ) => Datum::i128_to_decimal(*val as i128, *precision, *scale),
                     // Let's wait with nano's until this clears up: https://github.com/apache/iceberg/pull/11775
                     (PrimitiveLiteral::Int128(val), _, PrimitiveType::Long) => {
                         Ok(Datum::i128_to_i64(*val))
                     }
 
-                    // Floating range narrowing.
+                    // Floating range narrowing and decimal conversions.
+                    (PrimitiveLiteral::Float(val), _, PrimitiveType::Double) => {
+                        Ok(Datum::double(f64::from(val.into_inner())))
+                    }
+                    (
+                        PrimitiveLiteral::Float(val),
+                        _,
+                        PrimitiveType::Decimal { precision, scale },
+                    ) => Datum::f64_to_decimal(f64::from(val.into_inner()), *precision, *scale),
                     (PrimitiveLiteral::Double(val), _, PrimitiveType::Float) => {
                         Ok(Datum::f64_to_f32(val.into_inner()))
                     }
+                    (
+                        PrimitiveLiteral::Double(val),
+                        _,
+                        PrimitiveType::Decimal { precision, scale },
+                    ) => Datum::f64_to_decimal(val.into_inner(), *precision, *scale),
 
                     // Decimal precision changes are supported only when the
                     // decimal scale is unchanged.
