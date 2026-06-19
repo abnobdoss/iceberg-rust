@@ -1294,6 +1294,167 @@ fn test_datum_string_convert_to_timestamptz() {
 }
 
 #[test]
+fn test_datum_float_convert_to_double() {
+    let datum = Datum::float(1.25f32);
+
+    let result = datum.to(&Primitive(PrimitiveType::Double)).unwrap();
+
+    assert_eq!(result, Datum::double(1.25f64));
+}
+
+#[test]
+fn test_datum_double_convert_to_float() {
+    let datum = Datum::double(1.25f64);
+    let result = datum.to(&Primitive(PrimitiveType::Float)).unwrap();
+    let expected = Datum::float(1.25f32);
+    assert_eq!(result, expected);
+
+    // In-range but not exactly representable: round to the nearest float,
+    // matching Java's `DoubleLiteral.to(FloatType)`.
+    let datum_inexact = Datum::double(1.23f64);
+    let result_inexact = datum_inexact.to(&Primitive(PrimitiveType::Float)).unwrap();
+    assert_eq!(result_inexact, Datum::float(1.23f32));
+
+    let datum_neg_zero = Datum::double(-0.0f64);
+    let result_neg_zero = datum_neg_zero.to(&Primitive(PrimitiveType::Float)).unwrap();
+    assert_eq!(result_neg_zero, Datum::float(-0.0f32));
+
+    let datum_nan = Datum::double(f64::NAN);
+    let result_nan = datum_nan.to(&Primitive(PrimitiveType::Float)).unwrap();
+    assert!(result_nan.is_nan());
+    assert_eq!(result_nan.data_type(), &PrimitiveType::Float);
+}
+
+#[test]
+fn test_datum_double_convert_to_float_above_max() {
+    // Exact upper boundary: f32::MAX is representable, so it must round to the
+    // float and not collapse to AboveMax.
+    let datum_max = Datum::double(f32::MAX as f64);
+    let result_max = datum_max.to(&Primitive(PrimitiveType::Float)).unwrap();
+    assert_eq!(result_max, Datum::float(f32::MAX));
+
+    // Above float range: collapse to the AboveMax sentinel, not an error.
+    let datum_overflow = Datum::double(1e40f64);
+    let result_overflow = datum_overflow.to(&Primitive(PrimitiveType::Float)).unwrap();
+    assert_eq!(
+        result_overflow,
+        Datum::new(PrimitiveType::Float, PrimitiveLiteral::AboveMax)
+    );
+
+    // +Inf is above Float.MAX_VALUE, so Java collapses it to AboveMax rather
+    // than a float infinity.
+    let datum_inf = Datum::double(f64::INFINITY);
+    let result_inf = datum_inf.to(&Primitive(PrimitiveType::Float)).unwrap();
+    assert_eq!(
+        result_inf,
+        Datum::new(PrimitiveType::Float, PrimitiveLiteral::AboveMax)
+    );
+}
+
+#[test]
+fn test_datum_double_convert_to_float_below_min() {
+    // Exact lower boundary: f32::MIN is representable, so it must round to the
+    // float and not collapse to BelowMin.
+    let datum_min = Datum::double(f32::MIN as f64);
+    let result_min = datum_min.to(&Primitive(PrimitiveType::Float)).unwrap();
+    assert_eq!(result_min, Datum::float(f32::MIN));
+
+    // Below float range: collapse to the BelowMin sentinel.
+    let datum_underflow = Datum::double(-1e40f64);
+    let result_underflow = datum_underflow
+        .to(&Primitive(PrimitiveType::Float))
+        .unwrap();
+    assert_eq!(
+        result_underflow,
+        Datum::new(PrimitiveType::Float, PrimitiveLiteral::BelowMin)
+    );
+}
+
+#[test]
+fn test_datum_float_convert_to_decimal() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 3,
+        scale: 1,
+    });
+    let datum = Datum::float(1.25f32);
+
+    let result = datum.to(&target_type).unwrap();
+
+    assert_eq!(result.data_type(), &PrimitiveType::Decimal {
+        precision: 3,
+        scale: 1,
+    });
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(13));
+}
+
+#[test]
+fn test_datum_double_convert_to_decimal() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 4,
+        scale: 2,
+    });
+    let datum = Datum::double(-1.255f64);
+
+    let result = datum.to(&target_type).unwrap();
+
+    assert_eq!(result.data_type(), &PrimitiveType::Decimal {
+        precision: 4,
+        scale: 2,
+    });
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(-126));
+}
+
+#[test]
+fn test_datum_double_convert_to_decimal_rejects_precision_too_narrow() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 3,
+        scale: 1,
+    });
+    let datum = Datum::double(999.95f64);
+
+    let result = datum.to(&target_type);
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_float_and_double_convert_to_decimal_rejects_non_finite() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 9,
+        scale: 2,
+    });
+
+    let result_float = Datum::float(f32::NAN).to(&target_type);
+    assert!(
+        result_float.is_err(),
+        "expect error but got {result_float:?}"
+    );
+    assert_eq!(result_float.unwrap_err().kind(), ErrorKind::DataInvalid);
+
+    let result_double = Datum::double(f64::INFINITY).to(&target_type);
+    assert!(
+        result_double.is_err(),
+        "expect error but got {result_double:?}"
+    );
+    assert_eq!(result_double.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_float_and_double_convert_to_int_or_long_is_unsupported() {
+    for datum in [Datum::float(1.25f32), Datum::double(1.25f64)] {
+        for target_type in [
+            Primitive(PrimitiveType::Int),
+            Primitive(PrimitiveType::Long),
+        ] {
+            let result = datum.clone().to(&target_type);
+            assert!(result.is_err(), "expect error but got {result:?}");
+            assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+        }
+    }
+}
+
+#[test]
 fn test_iceberg_float_order() {
     // Test float ordering
     let float_values = vec![
