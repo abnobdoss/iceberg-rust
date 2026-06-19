@@ -1056,14 +1056,21 @@ impl Datum {
         Self::decimal_from_mantissa(mantissa, precision, scale)
     }
 
-    fn i64_to_i32<T: Into<i64> + PartialOrd<i64>>(val: T) -> Datum {
+    fn i64_to_i32_as_type<T: Into<i64> + PartialOrd<i64>>(
+        val: T,
+        target_type: PrimitiveType,
+    ) -> Datum {
         if val > INT_MAX as i64 {
-            Datum::new(PrimitiveType::Int, PrimitiveLiteral::AboveMax)
+            Datum::new(target_type, PrimitiveLiteral::AboveMax)
         } else if val < INT_MIN as i64 {
-            Datum::new(PrimitiveType::Int, PrimitiveLiteral::BelowMin)
+            Datum::new(target_type, PrimitiveLiteral::BelowMin)
         } else {
-            Datum::int(val.into() as i32)
+            Datum::new(target_type, PrimitiveLiteral::Int(val.into() as i32))
         }
+    }
+
+    fn i64_to_i32<T: Into<i64> + PartialOrd<i64>>(val: T) -> Datum {
+        Datum::i64_to_i32_as_type(val, PrimitiveType::Int)
     }
 
     fn i128_to_i32<T: Into<i128> + PartialOrd<i128>>(val: T) -> Datum {
@@ -1083,6 +1090,22 @@ impl Datum {
             Datum::new(PrimitiveType::Long, PrimitiveLiteral::BelowMin)
         } else {
             Datum::long(val.into() as i64)
+        }
+    }
+
+    /// Narrow a double to a float, mirroring Java's `DoubleLiteral.to(FloatType)`.
+    ///
+    /// Values outside the float range collapse to the `AboveMax`/`BelowMin`
+    /// sentinels handled by predicate evaluation; in-range values round to the
+    /// nearest float. The target column is physically `f32`, so comparison
+    /// happens in `f32` space. `NaN` rounds through to a float `NaN`.
+    fn f64_to_f32(val: f64) -> Datum {
+        if val > f32::MAX as f64 {
+            Datum::new(PrimitiveType::Float, PrimitiveLiteral::AboveMax)
+        } else if val < f32::MIN as f64 {
+            Datum::new(PrimitiveType::Float, PrimitiveLiteral::BelowMin)
+        } else {
+            Datum::float(val as f32)
         }
     }
 
@@ -1117,11 +1140,20 @@ impl Datum {
         match target_type {
             Type::Primitive(target_primitive_type) => {
                 match (&self.literal, &self.r#type, target_primitive_type) {
+                    // Integer-backed conversions, including date/time types
+                    // that are physically stored as int or long literals.
                     (PrimitiveLiteral::Int(val), _, PrimitiveType::Int) => Ok(Datum::int(*val)),
                     (PrimitiveLiteral::Int(val), _, PrimitiveType::Date) => Ok(Datum::date(*val)),
                     (PrimitiveLiteral::Int(val), _, PrimitiveType::Long) => Ok(Datum::long(*val)),
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Int) => {
                         Ok(Datum::i64_to_i32(*val))
+                    }
+                    // Only a plain `long` literal narrows to `date`, mirroring
+                    // Java's `LongLiteral.to(DateType)`. Temporal sources such as
+                    // `time` are also physically `Long`, so the source type is
+                    // pinned to avoid silently reinterpreting them as day ordinals.
+                    (PrimitiveLiteral::Long(val), PrimitiveType::Long, PrimitiveType::Date) => {
+                        Ok(Datum::i64_to_i32_as_type(*val, PrimitiveType::Date))
                     }
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Timestamp) => {
                         Ok(Datum::timestamp_micros(*val))
@@ -1133,6 +1165,14 @@ impl Datum {
                     (PrimitiveLiteral::Int128(val), _, PrimitiveType::Long) => {
                         Ok(Datum::i128_to_i64(*val))
                     }
+
+                    // Floating range narrowing.
+                    (PrimitiveLiteral::Double(val), _, PrimitiveType::Float) => {
+                        Ok(Datum::f64_to_f32(val.into_inner()))
+                    }
+
+                    // Decimal precision changes are supported only when the
+                    // decimal scale is unchanged.
                     (
                         PrimitiveLiteral::Int128(val),
                         PrimitiveType::Decimal {
@@ -1164,6 +1204,8 @@ impl Datum {
                             "Decimal scale conversion is not supported: source scale {self_scale}, target scale {target_scale}"
                         ),
                     )),
+
+                    // String parsing conversions.
                     (PrimitiveLiteral::String(val), _, PrimitiveType::Boolean) => {
                         Datum::bool_from_str(val)
                     }
@@ -1180,7 +1222,8 @@ impl Datum {
                         Datum::timestamptz_from_str(val)
                     }
 
-                    // TODO: implement more type conversions
+                    // Same-type passthrough; unsupported conversions fall
+                    // through to the error below.
                     (_, self_type, target_type) if self_type == target_type => Ok(self),
                     _ => Err(Error::new(
                         ErrorKind::DataInvalid,

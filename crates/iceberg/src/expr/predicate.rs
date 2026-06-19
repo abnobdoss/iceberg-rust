@@ -459,11 +459,17 @@ impl Bind for Predicate {
             }
             Predicate::Set(expr) => {
                 let bound_expr = expr.bind(schema, case_sensitive)?;
-                let bound_literals = bound_expr
+                let mut bound_literals = bound_expr
                     .literals
                     .into_iter()
                     .map(|l| l.to(&bound_expr.term.field().field_type))
                     .collect::<Result<FnvHashSet<Datum>>>()?;
+                bound_literals.retain(|literal| {
+                    !matches!(
+                        literal.literal(),
+                        PrimitiveLiteral::AboveMax | PrimitiveLiteral::BelowMin
+                    )
+                });
 
                 match &bound_expr.op {
                     &PredicateOperator::In => {
@@ -1021,6 +1027,18 @@ mod tests {
         )
     }
 
+    fn table_schema_with_date() -> SchemaRef {
+        Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::required(1, "dt", Type::Primitive(PrimitiveType::Date)).into(),
+                ])
+                .build()
+                .unwrap(),
+        )
+    }
+
     fn test_bound_predicate_serialize_diserialize(bound_predicate: BoundPredicate) {
         let serialized = serde_json::to_string(&bound_predicate).unwrap();
         let deserialized: BoundPredicate = serde_json::from_str(&serialized).unwrap();
@@ -1296,6 +1314,122 @@ mod tests {
         let expr = Reference::new("bar").greater_than_or_equal_to(Datum::long(-2147483649i64));
         let bound_expr = expr.bind(schema, true).unwrap();
         assert_eq!(&format!("{bound_expr}"), "True");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_float_with_double_above_max() {
+        let schema = table_schema_simple();
+        let expr = Reference::new("qux").less_than(Datum::double(1e40f64));
+        let bound_expr = expr.bind(schema.clone(), true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "True");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+
+        let expr = Reference::new("qux").greater_than(Datum::double(1e40f64));
+        let bound_expr = expr.bind(schema, true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "False");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_float_with_double_below_min() {
+        let schema = table_schema_simple();
+        let expr = Reference::new("qux").greater_than(Datum::double(-1e40f64));
+        let bound_expr = expr.bind(schema.clone(), true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "True");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+
+        let expr = Reference::new("qux").less_than(Datum::double(-1e40f64));
+        let bound_expr = expr.bind(schema, true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "False");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_date_with_long_above_max() {
+        let schema = table_schema_with_date();
+        let expr = Reference::new("dt").less_than(Datum::long(i32::MAX as i64 + 1));
+        let bound_expr = expr.bind(schema.clone(), true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "True");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+
+        let expr = Reference::new("dt").greater_than(Datum::long(i32::MAX as i64 + 1));
+        let bound_expr = expr.bind(schema, true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "False");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_date_with_long_below_min() {
+        let schema = table_schema_with_date();
+        let expr = Reference::new("dt").greater_than(Datum::long(i32::MIN as i64 - 1));
+        let bound_expr = expr.bind(schema.clone(), true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "True");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+
+        let expr = Reference::new("dt").less_than(Datum::long(i32::MIN as i64 - 1));
+        let bound_expr = expr.bind(schema, true).unwrap();
+        assert_eq!(&format!("{bound_expr}"), "False");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_in_drops_above_max_and_below_min() {
+        let schema = table_schema_simple();
+
+        let bound_expr = Reference::new("bar")
+            .is_in([Datum::long(i64::MAX), Datum::long(i64::MIN)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert_eq!(&format!("{bound_expr}"), "False");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+
+        let bound_expr = Reference::new("bar")
+            .is_in([Datum::long(i64::MAX), Datum::long(5)])
+            .bind(schema, true)
+            .unwrap();
+        assert_eq!(&format!("{bound_expr}"), "bar = 5");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_not_in_drops_above_max_and_below_min() {
+        let schema = table_schema_simple();
+
+        let bound_expr = Reference::new("bar")
+            .is_not_in([Datum::long(i64::MAX), Datum::long(i64::MIN)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert_eq!(&format!("{bound_expr}"), "True");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+
+        let bound_expr = Reference::new("bar")
+            .is_not_in([Datum::long(i64::MIN), Datum::long(5)])
+            .bind(schema, true)
+            .unwrap();
+        assert_eq!(&format!("{bound_expr}"), "bar != 5");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_float_in_drops_double_above_max() {
+        let schema = table_schema_simple();
+        let bound_expr = Reference::new("qux")
+            .is_in([Datum::double(1e40f64), Datum::double(1.5f64)])
+            .bind(schema, true)
+            .unwrap();
+        assert_eq!(&format!("{bound_expr}"), "qux = 1.5");
+        test_bound_predicate_serialize_diserialize(bound_expr);
+    }
+
+    #[test]
+    fn test_bind_date_in_drops_long_above_max() {
+        let schema = table_schema_with_date();
+        let bound_expr = Reference::new("dt")
+            .is_in([Datum::long(i32::MAX as i64 + 1), Datum::long(5)])
+            .bind(schema, true)
+            .unwrap();
+        assert_eq!(&format!("{bound_expr}"), "dt = 1970-01-06");
         test_bound_predicate_serialize_diserialize(bound_expr);
     }
 
