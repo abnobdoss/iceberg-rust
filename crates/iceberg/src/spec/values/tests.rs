@@ -115,6 +115,206 @@ fn check_serialize_avro(literal: Literal, ty: &Type, expect_value: Value) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DatumRouteTarget {
+    Boolean,
+    Int,
+    Long,
+    Float,
+    Double,
+    Date,
+    Time,
+    Timestamp,
+    Timestamptz,
+    TimestampNs,
+    TimestamptzNs,
+    String,
+    Uuid,
+    Fixed3,
+    Fixed2,
+    Binary,
+    Decimal9Scale2,
+    Decimal4Scale2,
+    Decimal9Scale1,
+}
+
+const DATUM_ROUTE_TARGETS: &[DatumRouteTarget] = &[
+    DatumRouteTarget::Boolean,
+    DatumRouteTarget::Int,
+    DatumRouteTarget::Long,
+    DatumRouteTarget::Float,
+    DatumRouteTarget::Double,
+    DatumRouteTarget::Date,
+    DatumRouteTarget::Time,
+    DatumRouteTarget::Timestamp,
+    DatumRouteTarget::Timestamptz,
+    DatumRouteTarget::TimestampNs,
+    DatumRouteTarget::TimestamptzNs,
+    DatumRouteTarget::String,
+    DatumRouteTarget::Uuid,
+    DatumRouteTarget::Fixed3,
+    DatumRouteTarget::Fixed2,
+    DatumRouteTarget::Binary,
+    DatumRouteTarget::Decimal9Scale2,
+    DatumRouteTarget::Decimal4Scale2,
+    DatumRouteTarget::Decimal9Scale1,
+];
+
+impl DatumRouteTarget {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Int => "int",
+            Self::Long => "long",
+            Self::Float => "float",
+            Self::Double => "double",
+            Self::Date => "date",
+            Self::Time => "time",
+            Self::Timestamp => "timestamp",
+            Self::Timestamptz => "timestamptz",
+            Self::TimestampNs => "timestamp_ns",
+            Self::TimestamptzNs => "timestamptz_ns",
+            Self::String => "string",
+            Self::Uuid => "uuid",
+            Self::Fixed3 => "fixed(3)",
+            Self::Fixed2 => "fixed(2)",
+            Self::Binary => "binary",
+            Self::Decimal9Scale2 => "decimal(9, 2)",
+            Self::Decimal4Scale2 => "decimal(4, 2)",
+            Self::Decimal9Scale1 => "decimal(9, 1)",
+        }
+    }
+
+    fn primitive_type(self) -> PrimitiveType {
+        match self {
+            Self::Boolean => PrimitiveType::Boolean,
+            Self::Int => PrimitiveType::Int,
+            Self::Long => PrimitiveType::Long,
+            Self::Float => PrimitiveType::Float,
+            Self::Double => PrimitiveType::Double,
+            Self::Date => PrimitiveType::Date,
+            Self::Time => PrimitiveType::Time,
+            Self::Timestamp => PrimitiveType::Timestamp,
+            Self::Timestamptz => PrimitiveType::Timestamptz,
+            Self::TimestampNs => PrimitiveType::TimestampNs,
+            Self::TimestamptzNs => PrimitiveType::TimestamptzNs,
+            Self::String => PrimitiveType::String,
+            Self::Uuid => PrimitiveType::Uuid,
+            Self::Fixed3 => PrimitiveType::Fixed(3),
+            Self::Fixed2 => PrimitiveType::Fixed(2),
+            Self::Binary => PrimitiveType::Binary,
+            Self::Decimal9Scale2 => PrimitiveType::Decimal {
+                precision: 9,
+                scale: 2,
+            },
+            Self::Decimal4Scale2 => PrimitiveType::Decimal {
+                precision: 4,
+                scale: 2,
+            },
+            Self::Decimal9Scale1 => PrimitiveType::Decimal {
+                precision: 9,
+                scale: 1,
+            },
+        }
+    }
+}
+
+fn datum_route_failures<F>(
+    source_name: &str,
+    mut source: F,
+    accepted_targets: &[DatumRouteTarget],
+) -> Vec<String>
+where
+    F: FnMut(DatumRouteTarget) -> Datum,
+{
+    // This matrix describes the desired logical conversion surface, not every
+    // route that is possible through the physical backing literal.
+    let mut failures = Vec::new();
+
+    for &target in DATUM_ROUTE_TARGETS {
+        let target_type = target.primitive_type();
+        let result = source(target).to(&Primitive(target_type.clone()));
+        let route_name = format!("{} -> {}", source_name, target.name());
+
+        if accepted_targets.contains(&target) {
+            match result {
+                Ok(result) if result.data_type() == &target_type => {}
+                Ok(result) => failures.push(format!(
+                    "{route_name}: expected type {target_type:?}, got {:?}",
+                    result.data_type()
+                )),
+                Err(err) => failures.push(format!("{route_name}: expected ok, got {err}")),
+            }
+        } else {
+            match result {
+                Ok(result) => failures.push(format!(
+                    "{route_name}: expected error, got {:?}",
+                    result.literal()
+                )),
+                Err(err) if err.kind() == ErrorKind::DataInvalid => {}
+                Err(err) => failures.push(format!(
+                    "{route_name}: expected DataInvalid, got {:?}",
+                    err.kind()
+                )),
+            }
+        }
+    }
+
+    failures
+}
+
+fn assert_no_datum_route_failures(group_name: &str, failures: Vec<String>) {
+    assert!(
+        failures.is_empty(),
+        "{} route mismatches:\n{}",
+        group_name,
+        failures.join("\n")
+    );
+}
+
+fn datum_route_string_source(target: DatumRouteTarget) -> Datum {
+    let value = match target {
+        DatumRouteTarget::Boolean => "true",
+        DatumRouteTarget::Int | DatumRouteTarget::Long => "34",
+        DatumRouteTarget::Date => "2017-08-18",
+        DatumRouteTarget::Time => "14:21:01.919",
+        DatumRouteTarget::Timestamp => "2017-08-18T14:21:01.919",
+        DatumRouteTarget::Timestamptz => "2017-08-18T14:21:01.919Z",
+        DatumRouteTarget::TimestampNs => "2017-08-18T14:21:01.919123456",
+        DatumRouteTarget::TimestamptzNs => "2017-08-18T14:21:01.919123456Z",
+        DatumRouteTarget::Uuid => "f79c3e09-677c-4bbd-a479-3f349cb785e7",
+        DatumRouteTarget::Fixed3 | DatumRouteTarget::Binary => "000102",
+        DatumRouteTarget::Fixed2 => "0001",
+        DatumRouteTarget::Decimal9Scale2 => "123.45",
+        DatumRouteTarget::Decimal4Scale2 => "12.34",
+        DatumRouteTarget::Decimal9Scale1 => "123.4",
+        DatumRouteTarget::String => "iceberg",
+        DatumRouteTarget::Float | DatumRouteTarget::Double => "1.25",
+    };
+    Datum::string(value)
+}
+
+fn datum_route_decimal_source(target: DatumRouteTarget) -> Datum {
+    match target {
+        DatumRouteTarget::Long => Datum::decimal(decimal_new(12345, 0)).unwrap(),
+        _ => Datum::decimal_from_str("123.45").unwrap(),
+    }
+}
+
+struct DatumConversionCase {
+    name: &'static str,
+    datum: Datum,
+    target_type: PrimitiveType,
+    expected: Datum,
+}
+
+fn assert_datum_conversion_cases(cases: Vec<DatumConversionCase>) {
+    for case in cases {
+        let result = case.datum.to(&Primitive(case.target_type)).unwrap();
+        assert_eq!(result, case.expected, "{}", case.name);
+    }
+}
+
 #[test]
 fn json_boolean() {
     let record = r#"true"#;
@@ -1126,6 +1326,335 @@ fn test_datum_ser_deser() {
     test_fn(datum);
     let datum = Datum::fixed(vec![1, 2, 3, 4, 5]);
     test_fn(datum);
+}
+
+#[test]
+fn test_datum_numeric_conversion_routes() {
+    use DatumRouteTarget::*;
+
+    let mut failures = Vec::new();
+
+    failures.extend(datum_route_failures("int", |_| Datum::int(34), &[
+        Int,
+        Long,
+        Float,
+        Double,
+        Date,
+        Decimal9Scale2,
+        Decimal4Scale2,
+        Decimal9Scale1,
+    ]));
+    failures.extend(datum_route_failures("long", |_| Datum::long(34), &[
+        Int,
+        Long,
+        Float,
+        Double,
+        Date,
+        Time,
+        Timestamp,
+        Timestamptz,
+        TimestampNs,
+        TimestamptzNs,
+        Decimal9Scale2,
+        Decimal4Scale2,
+        Decimal9Scale1,
+    ]));
+    failures.extend(datum_route_failures("float", |_| Datum::float(1.25f32), &[
+        Float,
+        Double,
+        Decimal9Scale2,
+        Decimal4Scale2,
+        Decimal9Scale1,
+    ]));
+    failures.extend(datum_route_failures(
+        "double",
+        |_| Datum::double(1.25f64),
+        &[
+            Float,
+            Double,
+            Decimal9Scale2,
+            Decimal4Scale2,
+            Decimal9Scale1,
+        ],
+    ));
+
+    assert_no_datum_route_failures("numeric", failures);
+}
+
+#[test]
+fn test_datum_temporal_conversion_routes() {
+    use DatumRouteTarget::*;
+
+    let mut failures = Vec::new();
+
+    failures.extend(datum_route_failures("date", |_| Datum::date(34), &[Date]));
+    failures.extend(datum_route_failures(
+        "time",
+        |_| Datum::time_micros(34).unwrap(),
+        &[Time],
+    ));
+    failures.extend(datum_route_failures(
+        "timestamp",
+        |_| Datum::timestamp_micros(34),
+        &[Date, Timestamp, TimestampNs],
+    ));
+    failures.extend(datum_route_failures(
+        "timestamptz",
+        |_| Datum::timestamptz_micros(34),
+        &[Date, Timestamptz, TimestamptzNs],
+    ));
+    failures.extend(datum_route_failures(
+        "timestamp_ns",
+        |_| Datum::timestamp_nanos(34),
+        &[Date, Timestamp, TimestampNs],
+    ));
+    failures.extend(datum_route_failures(
+        "timestamptz_ns",
+        |_| Datum::timestamptz_nanos(34),
+        &[Date, Timestamptz, TimestamptzNs],
+    ));
+
+    assert_no_datum_route_failures("temporal", failures);
+}
+
+#[test]
+fn test_datum_string_conversion_routes() {
+    use DatumRouteTarget::*;
+
+    let failures = datum_route_failures("string", datum_route_string_source, &[
+        Boolean,
+        Int,
+        Long,
+        Date,
+        Time,
+        Timestamp,
+        Timestamptz,
+        TimestampNs,
+        TimestamptzNs,
+        String,
+        Uuid,
+        Fixed3,
+        Fixed2,
+        Binary,
+        Decimal9Scale2,
+        Decimal4Scale2,
+        Decimal9Scale1,
+    ]);
+
+    assert_no_datum_route_failures("string", failures);
+}
+
+#[test]
+fn test_datum_decimal_conversion_routes() {
+    use DatumRouteTarget::*;
+
+    let failures = datum_route_failures("decimal", datum_route_decimal_source, &[
+        Long,
+        Decimal9Scale2,
+    ]);
+
+    assert_no_datum_route_failures("decimal", failures);
+}
+
+#[test]
+fn test_datum_other_conversion_routes() {
+    use DatumRouteTarget::*;
+
+    let mut failures = Vec::new();
+
+    failures.extend(datum_route_failures("boolean", |_| Datum::bool(true), &[
+        Boolean,
+    ]));
+    failures.extend(datum_route_failures(
+        "uuid",
+        |_| Datum::uuid(uuid::Uuid::parse_str("f79c3e09-677c-4bbd-a479-3f349cb785e7").unwrap()),
+        &[Uuid],
+    ));
+    failures.extend(datum_route_failures(
+        "fixed(3)",
+        |_| Datum::fixed(vec![0x00, 0x01, 0x02]),
+        &[Fixed3, Binary],
+    ));
+    failures.extend(datum_route_failures(
+        "binary",
+        |_| Datum::binary(vec![0x00, 0x01, 0x02]),
+        &[Fixed3, Binary],
+    ));
+
+    assert_no_datum_route_failures("other", failures);
+}
+
+#[test]
+fn test_datum_numeric_boundary_conversions() {
+    assert_datum_conversion_cases(vec![
+        DatumConversionCase {
+            name: "long -> int upper bound",
+            datum: Datum::long(INT_MAX as i64),
+            target_type: PrimitiveType::Int,
+            expected: Datum::int(INT_MAX),
+        },
+        DatumConversionCase {
+            name: "long -> int above upper bound",
+            datum: Datum::long(INT_MAX as i64 + 1),
+            target_type: PrimitiveType::Int,
+            expected: Datum::new(PrimitiveType::Int, PrimitiveLiteral::AboveMax),
+        },
+        DatumConversionCase {
+            name: "long -> int lower bound",
+            datum: Datum::long(INT_MIN as i64),
+            target_type: PrimitiveType::Int,
+            expected: Datum::int(INT_MIN),
+        },
+        DatumConversionCase {
+            name: "long -> int below lower bound",
+            datum: Datum::long(INT_MIN as i64 - 1),
+            target_type: PrimitiveType::Int,
+            expected: Datum::new(PrimitiveType::Int, PrimitiveLiteral::BelowMin),
+        },
+        DatumConversionCase {
+            name: "long -> date upper bound",
+            datum: Datum::long(INT_MAX as i64),
+            target_type: PrimitiveType::Date,
+            expected: Datum::date(INT_MAX),
+        },
+        DatumConversionCase {
+            name: "long -> date above upper bound",
+            datum: Datum::long(INT_MAX as i64 + 1),
+            target_type: PrimitiveType::Date,
+            expected: Datum::new(PrimitiveType::Date, PrimitiveLiteral::AboveMax),
+        },
+        DatumConversionCase {
+            name: "long -> date lower bound",
+            datum: Datum::long(INT_MIN as i64),
+            target_type: PrimitiveType::Date,
+            expected: Datum::date(INT_MIN),
+        },
+        DatumConversionCase {
+            name: "long -> date below lower bound",
+            datum: Datum::long(INT_MIN as i64 - 1),
+            target_type: PrimitiveType::Date,
+            expected: Datum::new(PrimitiveType::Date, PrimitiveLiteral::BelowMin),
+        },
+    ]);
+}
+
+#[test]
+fn test_datum_decimal_boundary_conversions() {
+    assert_datum_conversion_cases(vec![
+        DatumConversionCase {
+            name: "decimal -> long upper bound",
+            datum: Datum::decimal(decimal_from_i128_with_scale(LONG_MAX as i128, 0)).unwrap(),
+            target_type: PrimitiveType::Long,
+            expected: Datum::long(LONG_MAX),
+        },
+        DatumConversionCase {
+            name: "decimal -> long above upper bound",
+            datum: Datum::decimal(decimal_from_i128_with_scale(LONG_MAX as i128 + 1, 0)).unwrap(),
+            target_type: PrimitiveType::Long,
+            expected: Datum::new(PrimitiveType::Long, PrimitiveLiteral::AboveMax),
+        },
+        DatumConversionCase {
+            name: "decimal -> long lower bound",
+            datum: Datum::decimal(decimal_from_i128_with_scale(LONG_MIN as i128, 0)).unwrap(),
+            target_type: PrimitiveType::Long,
+            expected: Datum::long(LONG_MIN),
+        },
+        DatumConversionCase {
+            name: "decimal -> long below lower bound",
+            datum: Datum::decimal(decimal_from_i128_with_scale(LONG_MIN as i128 - 1, 0)).unwrap(),
+            target_type: PrimitiveType::Long,
+            expected: Datum::new(PrimitiveType::Long, PrimitiveLiteral::BelowMin),
+        },
+    ]);
+}
+
+#[test]
+fn test_datum_string_numeric_boundary_conversions() {
+    assert_datum_conversion_cases(vec![
+        DatumConversionCase {
+            name: "string -> int upper bound",
+            datum: Datum::string(INT_MAX.to_string()),
+            target_type: PrimitiveType::Int,
+            expected: Datum::int(INT_MAX),
+        },
+        DatumConversionCase {
+            name: "string -> int above upper bound",
+            datum: Datum::string((INT_MAX as i64 + 1).to_string()),
+            target_type: PrimitiveType::Int,
+            expected: Datum::new(PrimitiveType::Int, PrimitiveLiteral::AboveMax),
+        },
+        DatumConversionCase {
+            name: "string -> int lower bound",
+            datum: Datum::string(INT_MIN.to_string()),
+            target_type: PrimitiveType::Int,
+            expected: Datum::int(INT_MIN),
+        },
+        DatumConversionCase {
+            name: "string -> int below lower bound",
+            datum: Datum::string((INT_MIN as i64 - 1).to_string()),
+            target_type: PrimitiveType::Int,
+            expected: Datum::new(PrimitiveType::Int, PrimitiveLiteral::BelowMin),
+        },
+        DatumConversionCase {
+            name: "string -> long upper bound",
+            datum: Datum::string(LONG_MAX.to_string()),
+            target_type: PrimitiveType::Long,
+            expected: Datum::long(LONG_MAX),
+        },
+        DatumConversionCase {
+            name: "string -> long above upper bound",
+            datum: Datum::string((LONG_MAX as i128 + 1).to_string()),
+            target_type: PrimitiveType::Long,
+            expected: Datum::new(PrimitiveType::Long, PrimitiveLiteral::AboveMax),
+        },
+        DatumConversionCase {
+            name: "string -> long lower bound",
+            datum: Datum::string(LONG_MIN.to_string()),
+            target_type: PrimitiveType::Long,
+            expected: Datum::long(LONG_MIN),
+        },
+        DatumConversionCase {
+            name: "string -> long below lower bound",
+            datum: Datum::string((LONG_MIN as i128 - 1).to_string()),
+            target_type: PrimitiveType::Long,
+            expected: Datum::new(PrimitiveType::Long, PrimitiveLiteral::BelowMin),
+        },
+    ]);
+}
+
+#[test]
+fn test_datum_floating_boundary_conversions() {
+    let f32_max_as_f64 = f32::MAX as f64;
+    let just_above_f32_max = f64::from_bits(f32_max_as_f64.to_bits() + 1);
+    let f32_min_as_f64 = f32::MIN as f64;
+    let just_below_f32_min = f64::from_bits(f32_min_as_f64.to_bits() + 1);
+
+    assert_datum_conversion_cases(vec![
+        DatumConversionCase {
+            name: "double -> float upper bound",
+            datum: Datum::double(f32_max_as_f64),
+            target_type: PrimitiveType::Float,
+            expected: Datum::float(f32::MAX),
+        },
+        DatumConversionCase {
+            name: "double -> float above upper bound",
+            datum: Datum::double(just_above_f32_max),
+            target_type: PrimitiveType::Float,
+            expected: Datum::new(PrimitiveType::Float, PrimitiveLiteral::AboveMax),
+        },
+        DatumConversionCase {
+            name: "double -> float lower bound",
+            datum: Datum::double(f32_min_as_f64),
+            target_type: PrimitiveType::Float,
+            expected: Datum::float(f32::MIN),
+        },
+        DatumConversionCase {
+            name: "double -> float below lower bound",
+            datum: Datum::double(just_below_f32_min),
+            target_type: PrimitiveType::Float,
+            expected: Datum::new(PrimitiveType::Float, PrimitiveLiteral::BelowMin),
+        },
+    ]);
 }
 
 #[test]
