@@ -32,7 +32,7 @@ use super::decimal_utils::{
     Decimal, decimal_from_i128_with_scale, decimal_from_str_exact, decimal_mantissa,
     decimal_precision, decimal_rescale, decimal_scale, i128_from_be_bytes, i128_to_be_bytes_min,
 };
-use super::literal::Literal;
+use super::literal::{Literal, decode_hex_bytes};
 use super::primitive::PrimitiveLiteral;
 use super::serde::_serde::RawLiteral;
 use super::temporal::{date, time, timestamp, timestamptz};
@@ -1142,6 +1142,86 @@ impl Datum {
         Datum::decimal_from_mantissa(decimal_mantissa(&decimal), precision, scale)
     }
 
+    fn micros_to_nanos_as_type(val: i64, target_type: PrimitiveType) -> Result<Datum> {
+        let nanos = val.checked_mul(1_000).ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Timestamp value {val} micros is too large to convert to nanos."),
+            )
+        })?;
+
+        Ok(Datum::new(target_type, PrimitiveLiteral::Long(nanos)))
+    }
+
+    fn timestamp_micros_to_date(val: i64) -> Datum {
+        Datum::date(date::date_from_naive_date(
+            timestamp::microseconds_to_datetime(val).date(),
+        ))
+    }
+
+    fn timestamp_nanos_to_date(val: i64) -> Datum {
+        Datum::date(date::date_from_naive_date(
+            timestamp::nanoseconds_to_datetime(val).date(),
+        ))
+    }
+
+    fn timestamp_nanos_from_str<S: AsRef<str>>(s: S) -> Result<Datum> {
+        let dt = s.as_ref().parse::<NaiveDateTime>().map_err(|e| {
+            Error::new(ErrorKind::DataInvalid, "Can't parse timestamp.").with_source(e)
+        })?;
+        let nanos = dt.and_utc().timestamp_nanos_opt().ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Timestamp is out of nanosecond range: {}", s.as_ref()),
+            )
+        })?;
+
+        Ok(Datum::timestamp_nanos(nanos))
+    }
+
+    fn timestamptz_nanos_from_str<S: AsRef<str>>(s: S) -> Result<Datum> {
+        let dt = DateTime::<Utc>::from_str(s.as_ref()).map_err(|e| {
+            Error::new(ErrorKind::DataInvalid, "Can't parse datetime.").with_source(e)
+        })?;
+        let nanos = dt.timestamp_nanos_opt().ok_or_else(|| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                format!("Timestamptz is out of nanosecond range: {}", s.as_ref()),
+            )
+        })?;
+
+        Ok(Datum::timestamptz_nanos(nanos))
+    }
+
+    fn string_to_decimal<S: AsRef<str>>(s: S, precision: u32, scale: u32) -> Result<Datum> {
+        let decimal = decimal_from_str_exact(s.as_ref())?;
+        let self_scale = decimal_scale(&decimal);
+        if self_scale != scale {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "Decimal scale conversion is not supported: source scale {self_scale}, target scale {scale}"
+                ),
+            ));
+        }
+
+        Datum::decimal_from_mantissa(decimal_mantissa(&decimal), precision, scale)
+    }
+
+    fn bytes_to_fixed(bytes: Vec<u8>, length: u64) -> Result<Datum> {
+        if bytes.len() as u64 != length {
+            return Err(Error::new(
+                ErrorKind::DataInvalid,
+                format!(
+                    "Can't convert binary value of length {} to fixed({length}).",
+                    bytes.len()
+                ),
+            ));
+        }
+
+        Ok(Datum::fixed(bytes))
+    }
+
     fn string_to_i128<S: AsRef<str>>(s: S) -> Result<i128> {
         s.as_ref().parse::<i128>().map_err(|e| {
             Error::new(ErrorKind::DataInvalid, "Can't parse string to i128.").with_source(e)
@@ -1195,6 +1275,69 @@ impl Datum {
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Int) => {
                         Ok(Datum::i64_to_i32(*val))
                     }
+                    // Timestamp-family conversions. Crossing the with/without-zone
+                    // boundary between nanosecond timestamps is intentionally
+                    // rejected below (`timestamp_ns -> timestamptz` and
+                    // `timestamptz_ns -> timestamp`) rather than silently
+                    // reinterpreting the instant, since zone-adjustment semantics
+                    // differ. Date and precision (micros<->nanos) conversions
+                    // within the same zone family are supported.
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::Timestamp,
+                        PrimitiveType::Date,
+                    ) => Ok(Datum::timestamp_micros_to_date(*val)),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::Timestamp,
+                        PrimitiveType::TimestampNs,
+                    ) => Datum::micros_to_nanos_as_type(*val, PrimitiveType::TimestampNs),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::Timestamptz,
+                        PrimitiveType::Date,
+                    ) => Ok(Datum::timestamp_micros_to_date(*val)),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::Timestamptz,
+                        PrimitiveType::TimestamptzNs,
+                    ) => Datum::micros_to_nanos_as_type(*val, PrimitiveType::TimestamptzNs),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::TimestampNs,
+                        PrimitiveType::Date,
+                    ) => Ok(Datum::timestamp_nanos_to_date(*val)),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::TimestampNs,
+                        PrimitiveType::Timestamp,
+                    ) => Ok(Datum::timestamp_micros((*val).div_euclid(1_000))),
+                    (
+                        PrimitiveLiteral::Long(_),
+                        PrimitiveType::TimestampNs,
+                        PrimitiveType::Timestamptz,
+                    ) => Err(Error::new(
+                        ErrorKind::DataInvalid,
+                        "Can't convert timestamp_ns datum to timestamptz type.",
+                    )),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::TimestamptzNs,
+                        PrimitiveType::Date,
+                    ) => Ok(Datum::timestamp_nanos_to_date(*val)),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::TimestamptzNs,
+                        PrimitiveType::Timestamptz,
+                    ) => Ok(Datum::timestamptz_micros((*val).div_euclid(1_000))),
+                    (
+                        PrimitiveLiteral::Long(_),
+                        PrimitiveType::TimestamptzNs,
+                        PrimitiveType::Timestamp,
+                    ) => Err(Error::new(
+                        ErrorKind::DataInvalid,
+                        "Can't convert timestamptz_ns datum to timestamp type.",
+                    )),
                     // Only a plain `long` literal narrows to `date`, mirroring
                     // Java's `LongLiteral.to(DateType)`. Temporal sources such as
                     // `time` are also physically `Long`, so the source type is
@@ -1202,6 +1345,19 @@ impl Datum {
                     (PrimitiveLiteral::Long(val), PrimitiveType::Long, PrimitiveType::Date) => {
                         Ok(Datum::i64_to_i32_as_type(*val, PrimitiveType::Date))
                     }
+                    (PrimitiveLiteral::Long(val), PrimitiveType::Long, PrimitiveType::Time) => {
+                        Datum::time_micros(*val)
+                    }
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::Long,
+                        PrimitiveType::TimestampNs,
+                    ) => Datum::micros_to_nanos_as_type(*val, PrimitiveType::TimestampNs),
+                    (
+                        PrimitiveLiteral::Long(val),
+                        PrimitiveType::Long,
+                        PrimitiveType::TimestamptzNs,
+                    ) => Datum::micros_to_nanos_as_type(*val, PrimitiveType::TimestamptzNs),
                     (PrimitiveLiteral::Long(val), _, PrimitiveType::Timestamp) => {
                         Ok(Datum::timestamp_micros(*val))
                     }
@@ -1290,12 +1446,50 @@ impl Datum {
                     (PrimitiveLiteral::String(val), _, PrimitiveType::Long) => {
                         Datum::string_to_i128(val).map(Datum::i128_to_i64)
                     }
+                    (PrimitiveLiteral::String(val), _, PrimitiveType::Date) => {
+                        Datum::date_from_str(val)
+                    }
+                    (PrimitiveLiteral::String(val), _, PrimitiveType::Time) => {
+                        Datum::time_from_str(val)
+                    }
                     (PrimitiveLiteral::String(val), _, PrimitiveType::Timestamp) => {
                         Datum::timestamp_from_str(val)
                     }
                     (PrimitiveLiteral::String(val), _, PrimitiveType::Timestamptz) => {
                         Datum::timestamptz_from_str(val)
                     }
+                    (PrimitiveLiteral::String(val), _, PrimitiveType::TimestampNs) => {
+                        Datum::timestamp_nanos_from_str(val)
+                    }
+                    (PrimitiveLiteral::String(val), _, PrimitiveType::TimestamptzNs) => {
+                        Datum::timestamptz_nanos_from_str(val)
+                    }
+                    (PrimitiveLiteral::String(val), _, PrimitiveType::Uuid) => {
+                        Datum::uuid_from_str(val)
+                    }
+                    (
+                        PrimitiveLiteral::String(val),
+                        _,
+                        PrimitiveType::Decimal { precision, scale },
+                    ) => Datum::string_to_decimal(val, *precision, *scale),
+                    (PrimitiveLiteral::String(val), _, PrimitiveType::Fixed(length)) => {
+                        Datum::bytes_to_fixed(decode_hex_bytes(val)?, *length)
+                    }
+                    (PrimitiveLiteral::String(val), _, PrimitiveType::Binary) => {
+                        decode_hex_bytes(val).map(Datum::binary)
+                    }
+
+                    // Fixed and binary byte conversions.
+                    (
+                        PrimitiveLiteral::Binary(val),
+                        PrimitiveType::Fixed(_),
+                        PrimitiveType::Binary,
+                    ) => Ok(Datum::binary(val.clone())),
+                    (
+                        PrimitiveLiteral::Binary(val),
+                        PrimitiveType::Binary,
+                        PrimitiveType::Fixed(length),
+                    ) => Datum::bytes_to_fixed(val.clone(), *length),
 
                     // Same-type passthrough; unsupported conversions fall
                     // through to the error below.

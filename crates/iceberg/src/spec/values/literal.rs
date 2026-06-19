@@ -751,7 +751,7 @@ impl Literal {
     }
 }
 
-fn decode_hex_bytes(value: &str) -> Result<Vec<u8>> {
+pub(crate) fn decode_hex_bytes(value: &str) -> Result<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return Err(Error::new(
             ErrorKind::DataInvalid,

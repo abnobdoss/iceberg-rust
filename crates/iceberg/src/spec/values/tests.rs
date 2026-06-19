@@ -1364,6 +1364,158 @@ fn test_datum_long_convert_to_timestamptz() {
 }
 
 #[test]
+fn test_datum_long_convert_to_time() {
+    let datum = Datum::long(51_661_919_000i64);
+
+    let result = datum.to(&Primitive(PrimitiveType::Time)).unwrap();
+
+    let expected = Datum::time_micros(51_661_919_000).unwrap();
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_long_convert_to_timestamp_ns_and_timestamptz_ns() {
+    let datum = Datum::long(1234);
+
+    let timestamp_ns = datum
+        .clone()
+        .to(&Primitive(PrimitiveType::TimestampNs))
+        .unwrap();
+    assert_eq!(timestamp_ns, Datum::timestamp_nanos(1_234_000));
+
+    let timestamptz_ns = datum.to(&Primitive(PrimitiveType::TimestamptzNs)).unwrap();
+    assert_eq!(timestamptz_ns, Datum::timestamptz_nanos(1_234_000));
+}
+
+#[test]
+fn test_datum_timestamp_convert_to_date() {
+    let datum = Datum::timestamp_micros(1_483_228_800_000_000);
+
+    let result = datum.to(&Primitive(PrimitiveType::Date)).unwrap();
+
+    let expected = Datum::date_from_str("2017-01-01").unwrap();
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_timestamp_convert_to_date_pre_epoch_uses_floor() {
+    // One microsecond before the epoch falls on 1969-12-31. Java's
+    // `DateTimeUtil.microsToDays` floors toward negative infinity, so the day
+    // ordinal is -1 (truncation toward zero would wrongly yield 1970-01-01).
+    let datum = Datum::timestamp_micros(-1);
+
+    let result = datum.to(&Primitive(PrimitiveType::Date)).unwrap();
+
+    assert_eq!(result, Datum::date_from_str("1969-12-31").unwrap());
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int(-1));
+}
+
+#[test]
+fn test_datum_timestamp_convert_to_timestamp_ns() {
+    let datum = Datum::timestamp_micros(1234);
+
+    let result = datum.to(&Primitive(PrimitiveType::TimestampNs)).unwrap();
+
+    let expected = Datum::timestamp_nanos(1_234_000);
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_timestamp_ns_convert_to_date() {
+    let datum = Datum::timestamp_nanos(1_483_228_800_000_000_000);
+
+    let result = datum.to(&Primitive(PrimitiveType::Date)).unwrap();
+
+    let expected = Datum::date_from_str("2017-01-01").unwrap();
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_timestamp_ns_convert_to_timestamp() {
+    let datum = Datum::timestamp_nanos(1_234_567);
+
+    let result = datum.to(&Primitive(PrimitiveType::Timestamp)).unwrap();
+
+    let expected = Datum::timestamp_micros(1234);
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_timestamp_ns_convert_to_timestamp_uses_floor_division() {
+    let datum = Datum::timestamp_nanos(-1);
+
+    let result = datum.to(&Primitive(PrimitiveType::Timestamp)).unwrap();
+
+    let expected = Datum::timestamp_micros(-1);
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_timestamp_ns_convert_to_timestamptz_is_unsupported() {
+    let datum = Datum::timestamp_nanos(1_234_567);
+
+    let result = datum.to(&Primitive(PrimitiveType::Timestamptz));
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_timestamptz_convert_to_date_and_timestamptz_ns() {
+    let datum = Datum::timestamptz_micros(1_483_228_800_000_000);
+
+    let date_result = datum.clone().to(&Primitive(PrimitiveType::Date)).unwrap();
+    assert_eq!(date_result, Datum::date_from_str("2017-01-01").unwrap());
+
+    let nanos_result = datum.to(&Primitive(PrimitiveType::TimestamptzNs)).unwrap();
+    assert_eq!(
+        nanos_result,
+        Datum::timestamptz_nanos(1_483_228_800_000_000_000)
+    );
+}
+
+#[test]
+fn test_datum_timestamptz_ns_convert_to_date_and_timestamptz() {
+    let datum = Datum::timestamptz_nanos(1_483_228_800_000_000_999);
+
+    let date_result = datum.clone().to(&Primitive(PrimitiveType::Date)).unwrap();
+    assert_eq!(date_result, Datum::date_from_str("2017-01-01").unwrap());
+
+    let micros_result = datum.to(&Primitive(PrimitiveType::Timestamptz)).unwrap();
+    assert_eq!(
+        micros_result,
+        Datum::timestamptz_micros(1_483_228_800_000_000)
+    );
+}
+
+#[test]
+fn test_datum_timestamptz_ns_convert_to_timestamptz_uses_floor_division() {
+    let datum = Datum::timestamptz_nanos(-1);
+
+    let result = datum.to(&Primitive(PrimitiveType::Timestamptz)).unwrap();
+
+    let expected = Datum::timestamptz_micros(-1);
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_timestamptz_ns_convert_to_timestamp_is_unsupported() {
+    let datum = Datum::timestamptz_nanos(1_234_567);
+
+    let result = datum.to(&Primitive(PrimitiveType::Timestamp));
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
 fn test_datum_long_convert_to_float() {
     let datum = Datum::long(34);
 
@@ -1659,6 +1811,154 @@ fn test_datum_string_convert_to_timestamptz() {
     let expected = Datum::timestamptz_micros(-1407990900000000);
 
     assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_string_convert_to_date() {
+    let datum = Datum::string("2017-08-18");
+
+    let result = datum.to(&Primitive(PrimitiveType::Date)).unwrap();
+
+    let expected = Datum::date_from_str("2017-08-18").unwrap();
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_string_convert_to_time() {
+    let datum = Datum::string("14:21:01.919");
+
+    let result = datum.to(&Primitive(PrimitiveType::Time)).unwrap();
+
+    let expected = Datum::time_from_str("14:21:01.919").unwrap();
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_string_convert_to_timestamp_ns() {
+    let datum = Datum::string("2017-08-18T14:21:01.919123456");
+
+    let result = datum.to(&Primitive(PrimitiveType::TimestampNs)).unwrap();
+
+    let expected = Datum::timestamp_nanos(1_503_066_061_919_123_456);
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_string_convert_to_timestamptz_ns() {
+    let datum = Datum::string("2017-08-18T14:21:01.919123456Z");
+
+    let result = datum.to(&Primitive(PrimitiveType::TimestamptzNs)).unwrap();
+
+    let expected = Datum::timestamptz_nanos(1_503_066_061_919_123_456);
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_string_convert_to_uuid() {
+    let datum = Datum::string("f79c3e09-677c-4bbd-a479-3f349cb785e7");
+
+    let result = datum.to(&Primitive(PrimitiveType::Uuid)).unwrap();
+
+    let expected = Datum::uuid(Uuid::parse_str("f79c3e09-677c-4bbd-a479-3f349cb785e7").unwrap());
+
+    assert_eq!(result, expected);
+}
+
+#[test]
+fn test_datum_string_convert_to_decimal() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 5,
+        scale: 2,
+    });
+    let datum = Datum::string("123.45");
+
+    let result = datum.to(&target_type).unwrap();
+
+    assert_eq!(result.data_type(), &PrimitiveType::Decimal {
+        precision: 5,
+        scale: 2,
+    });
+    assert_eq!(result.literal(), &PrimitiveLiteral::Int128(12345));
+}
+
+#[test]
+fn test_datum_string_convert_to_decimal_rejects_scale_change() {
+    let target_type = Primitive(PrimitiveType::Decimal {
+        precision: 5,
+        scale: 1,
+    });
+    let datum = Datum::string("123.45");
+
+    let result = datum.to(&target_type);
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_string_convert_to_fixed_and_binary() {
+    let datum = Datum::string("00010Fff");
+
+    let fixed = datum
+        .clone()
+        .to(&Primitive(PrimitiveType::Fixed(4)))
+        .unwrap();
+    assert_eq!(fixed, Datum::fixed(vec![0x00, 0x01, 0x0F, 0xFF]));
+
+    let binary = datum.to(&Primitive(PrimitiveType::Binary)).unwrap();
+    assert_eq!(binary, Datum::binary(vec![0x00, 0x01, 0x0F, 0xFF]));
+}
+
+#[test]
+fn test_datum_string_convert_to_fixed_rejects_length_mismatch() {
+    let datum = Datum::string("00010Fff");
+
+    let result = datum.to(&Primitive(PrimitiveType::Fixed(3)));
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_string_convert_to_binary_rejects_invalid_hex() {
+    let datum = Datum::string("not-hex");
+
+    let result = datum.to(&Primitive(PrimitiveType::Binary));
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
+}
+
+#[test]
+fn test_datum_fixed_convert_to_binary() {
+    let datum = Datum::fixed(vec![0x00, 0x01, 0x02]);
+
+    let result = datum.to(&Primitive(PrimitiveType::Binary)).unwrap();
+
+    assert_eq!(result, Datum::binary(vec![0x00, 0x01, 0x02]));
+}
+
+#[test]
+fn test_datum_binary_convert_to_fixed() {
+    let datum = Datum::binary(vec![0x00, 0x01, 0x02]);
+
+    let result = datum.to(&Primitive(PrimitiveType::Fixed(3))).unwrap();
+
+    assert_eq!(result, Datum::fixed(vec![0x00, 0x01, 0x02]));
+}
+
+#[test]
+fn test_datum_binary_convert_to_fixed_rejects_length_mismatch() {
+    let datum = Datum::binary(vec![0x00, 0x01, 0x02]);
+
+    let result = datum.to(&Primitive(PrimitiveType::Fixed(2)));
+
+    assert!(result.is_err(), "expect error but got {result:?}");
+    assert_eq!(result.unwrap_err().kind(), ErrorKind::DataInvalid);
 }
 
 #[test]
