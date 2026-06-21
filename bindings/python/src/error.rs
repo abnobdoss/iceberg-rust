@@ -16,9 +16,27 @@
 // under the License.
 
 use pyo3::PyErr;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyNotImplementedError, PyOSError, PyValueError};
 
 /// Convert an iceberg error to a python error
 pub fn to_py_err(err: iceberg::Error) -> PyErr {
     PyValueError::new_err(err.to_string())
+}
+
+/// Convert an iceberg error from an I/O operation into the closest Python exception.
+///
+/// Unlike `to_py_err` (which maps everything to ValueError), I/O failures default to
+/// OSError. iceberg-storage-opendal flattens every opendal error to
+/// `ErrorKind::Unexpected` (crates/storage/opendal/src/utils.rs), so `err.kind()` on the
+/// I/O path carries no NotFound/PermissionDenied granularity; we map only the kinds the
+/// storage-resolution layer sets before opendal runs, and route the rest to OSError.
+/// Finer-grained typing (FileNotFoundError, PermissionError) must wait for an upstream
+/// `from_opendal_error` that preserves `ErrorKind`.
+pub fn to_py_io_err(err: iceberg::Error) -> PyErr {
+    let message = err.to_string();
+    match err.kind() {
+        iceberg::ErrorKind::DataInvalid => PyValueError::new_err(message),
+        iceberg::ErrorKind::FeatureUnsupported => PyNotImplementedError::new_err(message),
+        _ => PyOSError::new_err(message),
+    }
 }
