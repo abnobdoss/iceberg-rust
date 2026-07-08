@@ -100,6 +100,73 @@ jobs:
       - name: Cargo clippy
         run: make check-clippy
 
+  # Ubuntu build, standalone crate checks, and tests share one runner so the
+  # dependency graph compiles once instead of once per job. macOS and Windows
+  # keep their own build job below; clippy runs separately (ubuntu-only).
+  build-and-test:
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust toolchain
+        uses: ./.github/actions/setup-builder
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build without default features
+        run: cargo build -p iceberg --no-default-features
+
+      - name: Build
+        run: make build
+
+      # Checks each crate individually to catch missing feature declarations that
+      # are otherwise masked by Cargo's feature unification across the workspace.
+      - name: Check each crate standalone
+        run: |
+          for pkg in $(cargo metadata --no-deps --format-version=1 | jq -r '.packages[].name'); do
+            echo "Checking $pkg..."
+            cargo check -p "$pkg" --all-targets || exit 1
+          done
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
+        with:
+          tool: cargo-nextest
+
+      - name: Start Docker containers
+        run: make docker-up
+
+      - name: Run tests
+        shell: bash
+        env:
+          # HuggingFace Hub integration tests self-skip when these are unset
+          # (e.g. PRs from forks); see crates/storage/opendal/tests/file_io_hf_test.rs
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_BUCKET: ${{ secrets.HF_BUCKET }}
+          HF_DATASET: ${{ secrets.HF_DATASET }}
+        run: cargo nextest run --all-targets --all-features --workspace
+
+      - name: Run doc tests
+        run: cargo test --no-fail-fast --doc --all-features --workspace
+
+      - name: Stop Docker containers
+        if: always()
+        run: make docker-down
+
   build:
     needs: lint
     runs-on: ${{ matrix.os }}
@@ -110,7 +177,6 @@ jobs:
       max-parallel: 15
       matrix:
         os:
-          - ubuntu-latest
           - macos-latest
           - windows-latest
     steps:
@@ -136,97 +202,6 @@ jobs:
 
       - name: Build
         run: make build
-
-  # Checks each crate individually to catch missing feature declarations that
-  # are otherwise masked by Cargo's feature unification across the workspace.
-  check_standalone:
-    needs: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-
-      - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check each crate standalone
-        run: |
-          for pkg in $(cargo metadata --no-deps --format-version=1 | jq -r '.packages[].name'); do
-            echo "Checking $pkg..."
-            cargo check -p "$pkg" --all-targets || exit 1
-          done
-
-  tests:
-    needs: lint
-    runs-on: ubuntu-latest
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-    strategy:
-      max-parallel: 15
-      matrix:
-        test-suite:
-          - { name: "default", args: "--all-targets --all-features --workspace" }
-          - { name: "doc", args: "--doc --all-features --workspace" }
-    name: Tests (${{ matrix.test-suite.name }})
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: ${{ matrix.test-suite.name }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install cargo-nextest
-        if: matrix.test-suite.name == 'default'
-        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
-        with:
-          tool: cargo-nextest
-
-      - name: Start Docker containers
-        if: matrix.test-suite.name == 'default'
-        run: make docker-up
-
-      - name: Run tests
-        shell: bash
-        env:
-          # HuggingFace Hub integration tests self-skip when these are unset
-          # (e.g. PRs from forks); see crates/storage/opendal/tests/file_io_hf_test.rs
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_BUCKET: ${{ secrets.HF_BUCKET }}
-          HF_DATASET: ${{ secrets.HF_DATASET }}
-        run: |
-          if [ "${{ matrix.test-suite.name }}" = "default" ]; then
-            cargo nextest run ${{ matrix.test-suite.args }}
-          else
-            cargo test --no-fail-fast ${{ matrix.test-suite.args }}
-          fi
-
-      - name: Stop Docker containers
-        if: always() && matrix.test-suite.name == 'default'
-        run: make docker-down
 
   msrv:
     name: Verify MSRV
