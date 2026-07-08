@@ -114,6 +114,11 @@ jobs:
         with:
           persist-credentials: false
 
+      # Container startup overlaps the workspace build; the wait step below
+      # joins on the result before the tests need the containers.
+      - name: Start Docker containers in the background
+        run: make docker-up-background
+
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
@@ -147,8 +152,8 @@ jobs:
         with:
           tool: cargo-nextest
 
-      - name: Start Docker containers
-        run: make docker-up
+      - name: Wait for Docker containers
+        run: make docker-wait
 
       - name: Run tests
         shell: bash
