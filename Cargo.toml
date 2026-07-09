@@ -21,7 +21,7 @@
 # size-optimized publish settings (thin LTO, codegen-units=1, opt-level="z",
 # strip) never leak into CI builds.
 [profile.ci]
-codegen-units = 16
+codegen-units = 1
 debug = false
 inherits = "release"
 lto = false
