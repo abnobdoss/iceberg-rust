@@ -95,7 +95,12 @@ jobs:
       # The runner image and the files defining the build steps go into the
       # cache key: artifacts depend on both, and a full primary-key hit makes
       # rust-cache skip saving, so a cache from outdated steps or a different
-      # image could otherwise never heal itself.
+      # image could otherwise never heal itself. rust-cache's own environment
+      # hash is disabled because it includes the image-preinstalled stable
+      # toolchain, which no job uses and which varies across concurrent image
+      # builds, randomly breaking restores; everything else it covered is
+      # already keyed (env vars live in this file, the pinned toolchain in
+      # rust-toolchain.toml, which rust-cache hashes).
       - name: Get runner image id
         id: image
         shell: bash
@@ -106,11 +111,7 @@ jobs:
         with:
           key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Cargo clippy
         run: make check-clippy
@@ -146,11 +147,7 @@ jobs:
         with:
           key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Check each crate standalone
         run: |
@@ -195,11 +192,7 @@ jobs:
         with:
           key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Build without default features
         run: cargo build --locked -p iceberg --no-default-features
@@ -274,11 +267,7 @@ jobs:
         with:
           key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Build without default features
         run: cargo build --locked -p iceberg --no-default-features
@@ -294,10 +283,6 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Get MSRV
         id: get-msrv
         uses: ./.github/actions/get-msrv
@@ -320,5 +305,6 @@ jobs:
         with:
           key: msrv-${{ steps.get-msrv.outputs.msrv }}-${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
       - name: Check MSRV
         run: make check-msrv

@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-// CI warm-cache probe: comment-only change to trigger the code-PR workflows.
-
 //! Apache Iceberg Official Native Rust Implementation
 //!
 //! # Examples
