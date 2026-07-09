@@ -55,14 +55,16 @@ MSRV_VERSION    := $(shell awk -F'"' '/^rust-version/ {print $$2}' Cargo.toml)
 check-msrv:
 	cargo +$(MSRV_VERSION) check --workspace
 
-PUBLIC_API_CRATES := $(shell cargo metadata --no-deps --format-version 1 | \
-	jq -r '.packages[] | select(.publish == null) | "\(.name):\(.manifest_path)"')
+# Evaluated inside the recipes that need it rather than with $(shell) at parse
+# time, so plain `make <target>` invocations don't pay a cargo metadata call.
+PUBLIC_API_CRATES_CMD = cargo metadata --no-deps --format-version 1 | \
+	jq -r '.packages[] | select(.publish == null) | "\(.name):\(.manifest_path)"'
 
 install-cargo-public-api:
 	cargo install --locked cargo-public-api@0.51.0
 
 generate-public-api: install-cargo-public-api
-	@for entry in $(PUBLIC_API_CRATES); do \
+	@for entry in $$($(PUBLIC_API_CRATES_CMD)); do \
 		crate=$${entry%%:*}; \
 		manifest=$${entry##*:}; \
 		crate_dir=$$(dirname "$$manifest"); \
@@ -72,7 +74,7 @@ generate-public-api: install-cargo-public-api
 
 check-public-api: install-cargo-public-api
 	@fail=0; \
-	for entry in $(PUBLIC_API_CRATES); do \
+	for entry in $$($(PUBLIC_API_CRATES_CMD)); do \
 		crate=$${entry%%:*}; \
 		manifest=$${entry##*:}; \
 		crate_dir=$$(dirname "$$manifest"); \
@@ -111,8 +113,10 @@ docker-up:
 
 # Starts the containers without blocking so their startup can overlap other
 # work (e.g. the CI build); docker-wait joins on the result.
+# The subshell's stdio is fully detached so the caller (e.g. the CI runner)
+# isn't left holding open pipes until the containers finish starting.
 docker-up-background:
-	(docker compose -f dev/docker-compose.yaml up -d --build --wait > /tmp/docker-up.log 2>&1; echo $$? > /tmp/docker-up.exit) &
+	(docker compose -f dev/docker-compose.yaml up -d --build --wait > /tmp/docker-up.log 2>&1; echo $$? > /tmp/docker-up.exit) < /dev/null > /dev/null 2>&1 &
 
 docker-wait:
 	@while [ ! -f /tmp/docker-up.exit ]; do sleep 2; done

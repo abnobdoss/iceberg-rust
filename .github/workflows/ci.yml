@@ -92,6 +92,21 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # The runner image and the files defining the build steps go into the
+      # cache key: artifacts depend on both, and a full primary-key hit makes
+      # rust-cache skip saving, so a cache from outdated steps or a different
+      # image could otherwise never heal itself.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
       - name: Install protoc
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
@@ -119,9 +134,17 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # Image + build-definition files in the key so changed steps or a new
+      # runner image rotate the cache; see the clippy job for the rationale.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install protoc
@@ -133,7 +156,7 @@ jobs:
         run: |
           for pkg in $(cargo metadata --no-deps --format-version=1 | jq -r '.packages[].name'); do
             echo "Checking $pkg..."
-            cargo check -p "$pkg" --all-targets || exit 1
+            cargo check --locked -p "$pkg" --all-targets || exit 1
           done
 
   # The ubuntu build and tests share one runner so the dependency graph
@@ -160,9 +183,17 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # Image + build-definition files in the key so changed steps or a new
+      # runner image rotate the cache; see the clippy job for the rationale.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install protoc
@@ -171,10 +202,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build without default features
-        run: cargo build -p iceberg --no-default-features
+        run: cargo build --locked -p iceberg --no-default-features
 
       - name: Build
-        run: make build
+        run: cargo build --locked --all-targets --all-features --workspace
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
@@ -213,6 +244,13 @@ jobs:
         os:
           - macos-latest
           - windows-latest
+        include:
+          # pyiceberg_core_rust is a fully serialized ~1m40s tail of the
+          # Windows build (including its cdylib link), and the Bindings
+          # Python CI workflow already compiles the same crate on
+          # windows-latest for every code PR.
+          - os: windows-latest
+            build_args: --exclude pyiceberg_core_rust
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -221,9 +259,20 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # Image + build-definition files in the key so changed steps or a new
+      # runner image rotate the cache; see the clippy job for the rationale.
+      # The image id also keeps runs warm while `-latest` labels migrate
+      # between OS versions (a blob built on one image is partially invalid
+      # on another, e.g. pyo3 re-probes the system Python).
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install protoc
@@ -232,10 +281,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build without default features
-        run: cargo build -p iceberg --no-default-features
+        run: cargo build --locked -p iceberg --no-default-features
 
       - name: Build
-        run: make build
+        run: cargo build --locked --all-targets --all-features --workspace ${{ matrix.build_args }}
 
   msrv:
     name: Verify MSRV
@@ -258,5 +307,18 @@ jobs:
           rust-version: ${{ steps.get-msrv.outputs.msrv }}
       - name: Setup Nightly Rust toolchain
         uses: ./.github/actions/setup-builder
+      # Image + build-definition files in the key so changed steps or a new
+      # runner image rotate the cache; see the clippy job for the rationale.
+      # rust-cache already hashes every installed toolchain, so the explicit
+      # MSRV component is redundant, but it keeps the lineage self-describing.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: msrv-${{ steps.get-msrv.outputs.msrv }}-${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Check MSRV
         run: make check-msrv
