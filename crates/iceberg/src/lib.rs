@@ -61,6 +61,7 @@
 //! ```
 
 #![deny(missing_docs)]
+// Warm-cache probe: root-crate touch forces the workspace rebuild path.
 
 #[macro_use]
 extern crate derive_builder;
