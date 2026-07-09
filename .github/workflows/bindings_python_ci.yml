@@ -101,6 +101,7 @@ jobs:
         with:
           key: bindings-python-${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/bindings_python_ci.yml', 'bindings/python/pyproject.toml', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
       # `--profile ci` overrides the size-optimized release profile from
       # pyproject.toml: PR validation only needs a wheel that builds fast and
       # runs the test suite; the publish workflows pass their own profile.

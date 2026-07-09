@@ -57,11 +57,7 @@ jobs:
         with:
           key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/public-api.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          add-rust-environment-hash-key: 'false'
 
       # cargo-public-api has no prebuilt binaries anywhere (no release assets
       # upstream, unsupported by install-action, absent from quickinstall), so
