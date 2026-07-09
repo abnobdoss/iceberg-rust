@@ -231,6 +231,9 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
+      # Expands to the empty string on macOS, which cargo treats the same as
+      # the variable being unset, so the flag stays cache-exact per OS.
+      RUSTFLAGS: ${{ matrix.rustflags }}
     strategy:
       max-parallel: 15
       matrix:
@@ -238,12 +241,13 @@ jobs:
           - macos-latest
           - windows-latest
         include:
-          # pyiceberg_core_rust is a fully serialized ~1m40s tail of the
-          # Windows build (including its cdylib link), and the Bindings
-          # Python CI workflow already compiles the same crate on
-          # windows-latest for every code PR.
+          # link.exe is the slowest part of the Windows build: --all-targets
+          # produces ~32 test and binary link jobs. rust-lld ships with every
+          # rustup MSVC toolchain and links substantially faster; Linux
+          # runners already link with lld (the default there since Rust
+          # 1.90), so this also converges the platforms.
           - os: windows-latest
-            build_args: --exclude pyiceberg_core_rust
+            rustflags: -Clinker=rust-lld.exe
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -269,11 +273,17 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           add-rust-environment-hash-key: 'false'
 
-      - name: Build without default features
-        run: cargo build --locked -p iceberg --no-default-features
+      # cargo check is enough here: the ubuntu build-and-test job already
+      # fully builds and this job only guards feature-gated compile errors.
+      - name: Check without default features
+        run: cargo check --locked -p iceberg --no-default-features
 
+      # pyiceberg_core_rust is a fully serialized ~1m40s tail on both
+      # runners (including its cdylib link), and the Bindings Python CI
+      # workflow already compiles the same crate on windows-latest and
+      # macos-latest for every code PR.
       - name: Build
-        run: cargo build --locked --all-targets --all-features --workspace ${{ matrix.build_args }}
+        run: cargo build --locked --all-targets --all-features --workspace --exclude pyiceberg_core_rust
 
   msrv:
     name: Verify MSRV
@@ -294,8 +304,9 @@ jobs:
         uses: ./.github/actions/setup-builder
       # Image + build-definition files in the key so changed steps or a new
       # runner image rotate the cache; see the clippy job for the rationale.
-      # rust-cache already hashes every installed toolchain, so the explicit
-      # MSRV component is redundant, but it keeps the lineage self-describing.
+      # The explicit MSRV component rotates this cache on MSRV bumps and
+      # keeps the lineage self-describing (the root Cargo.toml hash below
+      # also covers it, since rust-version lives there).
       - name: Get runner image id
         id: image
         shell: bash
