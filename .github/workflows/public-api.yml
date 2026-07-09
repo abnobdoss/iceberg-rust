@@ -43,9 +43,19 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # The runner image and the files defining the build steps go into the
+      # cache key: artifacts depend on both, and a full primary-key hit makes
+      # rust-cache skip saving, so a cache from outdated steps or a different
+      # image could otherwise never heal itself.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/public-api.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: Install protoc
@@ -53,10 +63,10 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install cargo-public-api
-        uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
-        with:
-          tool: cargo-public-api
-
+      # cargo-public-api has no prebuilt binaries anywhere (no release assets
+      # upstream, unsupported by install-action, absent from quickinstall), so
+      # the make target's pinned `cargo install` is the only way to get it.
+      # rust-cache's cargo-bin caching makes that install a no-op on warm runs
+      # as long as no other step overwrites the installed binary.
       - name: Check public API
         run: make check-public-api

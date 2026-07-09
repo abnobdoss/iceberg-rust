@@ -15,6 +15,19 @@
 # specific language governing permissions and limitations
 # under the License.
 
+# Fast-compiling optimized profile for CI validation builds (e.g. the Python
+# bindings test wheel). It explicitly resets every key that the pyproject.toml
+# maturin config injects into the release profile it inherits from, so the
+# size-optimized publish settings (thin LTO, codegen-units=1, opt-level="z",
+# strip) never leak into CI builds.
+[profile.ci]
+codegen-units = 16
+debug = false
+inherits = "release"
+lto = false
+opt-level = 1
+strip = "none"
+
 [workspace]
 members = [
   "bindings/python",
