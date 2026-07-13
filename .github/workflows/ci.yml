@@ -119,7 +119,6 @@ jobs:
       max-parallel: 15
       matrix:
         os:
-          - ubuntu-latest
           - macos-latest
           - windows-latest
     steps:
@@ -161,9 +160,12 @@ jobs:
 
   # Checks each crate individually to catch missing feature declarations that
   # are otherwise masked by Cargo's feature unification across the workspace.
-  check_standalone:
+  check-standalone:
     needs: lint
     runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -190,34 +192,35 @@ jobs:
         run: |
           for pkg in $(cargo metadata --no-deps --format-version=1 | jq -r '.packages[].name'); do
             echo "Checking $pkg..."
-            cargo check -p "$pkg" --all-targets || exit 1
+            cargo check --locked -p "$pkg" --all-targets || exit 1
           done
 
-  tests:
+  # The ubuntu build and tests share one runner so the dependency graph
+  # compiles once instead of once per job. Docker containers start in the
+  # background while the workspace builds so their startup time overlaps the
+  # compile. macOS and Windows keep their own build job above; clippy and the
+  # standalone crate checks run as separate ubuntu jobs.
+  build-and-test:
     needs: lint
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
-    strategy:
-      max-parallel: 15
-      matrix:
-        test-suite:
-          - { name: "default", args: "--all-targets --all-features --workspace" }
-          - { name: "doc", args: "--doc --all-features --workspace" }
-    name: Tests (${{ matrix.test-suite.name }})
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      # Container startup overlaps the workspace build; the wait step below
+      # joins on the result before the tests need the containers.
+      - name: Start Docker containers in the background
+        run: make docker-up-background
 
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
       # Image + build-definition files in the key so changed steps or a new
       # runner image rotate the cache; see the build job for the rationale.
-      # The test-suite name stays in front so the default and doc suites keep
-      # separate cache lineages.
       - name: Get runner image id
         id: image
         shell: bash
@@ -226,19 +229,23 @@ jobs:
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: ${{ matrix.test-suite.name }}-${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           add-rust-environment-hash-key: 'false'
 
+      - name: Build without default features
+        run: cargo build --locked -p iceberg --no-default-features
+
+      - name: Build
+        run: cargo build --locked --all-targets --all-features --workspace
+
       - name: Install cargo-nextest
-        if: matrix.test-suite.name == 'default'
         uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
         with:
           tool: cargo-nextest
 
-      - name: Start Docker containers
-        if: matrix.test-suite.name == 'default'
-        run: make docker-up
+      - name: Wait for Docker containers
+        run: make docker-wait
 
       - name: Run tests
         shell: bash
@@ -248,15 +255,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_BUCKET: ${{ secrets.HF_BUCKET }}
           HF_DATASET: ${{ secrets.HF_DATASET }}
-        run: |
-          if [ "${{ matrix.test-suite.name }}" = "default" ]; then
-            cargo nextest run ${{ matrix.test-suite.args }}
-          else
-            cargo test --no-fail-fast ${{ matrix.test-suite.args }}
-          fi
+        run: cargo nextest run --all-targets --all-features --workspace
+
+      - name: Run doc tests
+        run: cargo test --no-fail-fast --doc --all-features --workspace
 
       - name: Stop Docker containers
-        if: always() && matrix.test-suite.name == 'default'
+        if: always()
         run: make docker-down
 
   msrv:
