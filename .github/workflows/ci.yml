@@ -161,13 +161,17 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           add-rust-environment-hash-key: 'false'
 
-      # Folded in from the former build_with_no_default_features job so the
-      # core crate's feature gating is checked without a second dep closure.
-      - name: Build without default features
-        run: cargo build --locked -p iceberg --no-default-features
+      # cargo check is enough here: the ubuntu build-and-test job already
+      # fully builds and this job only guards feature-gated compile errors.
+      - name: Check without default features
+        run: cargo check --locked -p iceberg --no-default-features
 
+      # pyiceberg_core_rust is a fully serialized ~1m40s tail on both
+      # runners (including its cdylib link), and the Bindings Python CI
+      # workflow already compiles the same crate on windows-latest and
+      # macos-latest for every code PR.
       - name: Build
-        run: make build
+        run: cargo build --locked --all-targets --all-features --workspace --exclude pyiceberg_core_rust
 
   # Checks each crate individually to catch missing feature declarations that
   # are otherwise masked by Cargo's feature unification across the workspace.
