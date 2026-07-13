@@ -115,12 +115,23 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
+      # Expands to the empty string on macOS, which cargo treats the same as
+      # the variable being unset, so the flag stays cache-exact per OS.
+      RUSTFLAGS: ${{ matrix.rustflags }}
     strategy:
       max-parallel: 15
       matrix:
         os:
           - macos-latest
           - windows-latest
+        include:
+          # link.exe is the slowest part of the Windows build: --all-targets
+          # produces ~32 test and binary link jobs. rust-lld ships with every
+          # rustup MSVC toolchain and links substantially faster; Linux
+          # runners already link with lld (the default there since Rust
+          # 1.90), so this also converges the platforms.
+          - os: windows-latest
+            rustflags: -Clinker=rust-lld.exe
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
