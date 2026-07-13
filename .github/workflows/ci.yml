@@ -92,6 +92,20 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # clippy compiles the whole dep graph in check mode, so cache it like the
+      # build jobs; see the build job for the keying rationale.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
+
       - name: Cargo clippy
         run: make check-clippy
 
@@ -297,5 +311,18 @@ jobs:
           rust-version: ${{ steps.get-msrv.outputs.msrv }}
       - name: Setup Nightly Rust toolchain
         uses: ./.github/actions/setup-builder
+      # The MSRV job had no cache; give it one keyed like the build jobs (see
+      # the build job for the rationale). The msrv- prefix rotates it on MSRV
+      # bumps and keeps the lineage self-describing.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+      - name: Cache Rust artifacts
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: msrv-${{ steps.get-msrv.outputs.msrv }}-${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
       - name: Check MSRV
         run: make check-msrv
