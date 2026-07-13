@@ -151,6 +151,11 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           add-rust-environment-hash-key: 'false'
 
+      # Folded in from the former build_with_no_default_features job so the
+      # core crate's feature gating is checked without a second dep closure.
+      - name: Build without default features
+        run: cargo build --locked -p iceberg --no-default-features
+
       - name: Build
         run: make build
 
@@ -187,46 +192,6 @@ jobs:
             echo "Checking $pkg..."
             cargo check -p "$pkg" --all-targets || exit 1
           done
-
-  # Verifies the core iceberg crate compiles without default features, ensuring
-  # optional functionality is properly gated behind feature flags.
-  build_with_no_default_features:
-    needs: lint
-    runs-on: ${{ matrix.os }}
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-    strategy:
-      max-parallel: 15
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-
-      # Image + build-definition files in the key so changed steps or a new
-      # runner image rotate the cache; see the build job for the rationale.
-      - name: Get runner image id
-        id: image
-        shell: bash
-        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          add-rust-environment-hash-key: 'false'
-
-      - name: Build
-        run: cargo build -p iceberg --no-default-features
 
   tests:
     needs: lint
