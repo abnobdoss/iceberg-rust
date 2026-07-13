@@ -116,10 +116,26 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # The runner image and the files defining the build steps go into the
+      # cache key: artifacts depend on both, and a full primary-key hit makes
+      # rust-cache skip saving, so a cache from outdated steps or a different
+      # image could otherwise never heal itself. rust-cache's own environment
+      # hash is disabled because it includes the image-preinstalled stable
+      # toolchain, which no job uses and which varies across concurrent image
+      # builds, randomly breaking restores; everything else it covered is
+      # already keyed (env vars live in this file, the pinned toolchain in
+      # rust-toolchain.toml, which rust-cache hashes).
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Build
         run: make build
@@ -137,10 +153,19 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # Image + build-definition files in the key so changed steps or a new
+      # runner image rotate the cache; see the build job for the rationale.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Check each crate standalone
         run: |
@@ -172,10 +197,19 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # Image + build-definition files in the key so changed steps or a new
+      # runner image rotate the cache; see the build job for the rationale.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          key: ${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Build
         run: cargo build -p iceberg --no-default-features
@@ -201,11 +235,21 @@ jobs:
       - name: Setup Rust toolchain
         uses: ./.github/actions/setup-builder
 
+      # Image + build-definition files in the key so changed steps or a new
+      # runner image rotate the cache; see the build job for the rationale.
+      # The test-suite name stays in front so the default and doc suites keep
+      # separate cache lineages.
+      - name: Get runner image id
+        id: image
+        shell: bash
+        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
+
       - name: Cache Rust artifacts
         uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          key: ${{ matrix.test-suite.name }}
+          key: ${{ matrix.test-suite.name }}-${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          add-rust-environment-hash-key: 'false'
 
       - name: Install cargo-nextest
         if: matrix.test-suite.name == 'default'
