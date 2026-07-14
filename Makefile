@@ -111,6 +111,18 @@ site: install-mdbook
 docker-up:
 	docker compose -f dev/docker-compose.yaml up -d --build --wait
 
+# Starts the containers without blocking so their startup can overlap other
+# work (e.g. the CI build); docker-wait joins on the result.
+# The subshell's stdio is fully detached so the caller (e.g. the CI runner)
+# isn't left holding open pipes until the containers finish starting.
+docker-up-background:
+	(docker compose -f dev/docker-compose.yaml up -d --build --wait > /tmp/docker-up.log 2>&1; echo $$? > /tmp/docker-up.exit) < /dev/null > /dev/null 2>&1 &
+
+docker-wait:
+	@while [ ! -f /tmp/docker-up.exit ]; do sleep 2; done
+	@cat /tmp/docker-up.log
+	@exit $$(cat /tmp/docker-up.exit)
+
 docker-down:
 	docker compose -f dev/docker-compose.yaml down -v --remove-orphans --timeout 0
 
