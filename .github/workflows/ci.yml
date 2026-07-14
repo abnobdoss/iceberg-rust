@@ -159,6 +159,38 @@ jobs:
       - name: Build
         run: make build
 
+      # The integration tests need the docker-compose services, which are only
+      # available on the Linux runner, so the test steps are gated to ubuntu.
+      # macOS and Windows still compile the full workspace above.
+      - name: Install cargo-nextest
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        with:
+          tool: cargo-nextest
+
+      - name: Start Docker containers
+        if: runner.os == 'Linux'
+        run: make docker-up
+
+      - name: Run tests
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          # HuggingFace Hub integration tests self-skip when these are unset
+          # (e.g. PRs from forks); see crates/storage/opendal/tests/file_io_hf_test.rs
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_BUCKET: ${{ secrets.HF_BUCKET }}
+          HF_DATASET: ${{ secrets.HF_DATASET }}
+        run: cargo nextest run --all-targets --all-features --workspace
+
+      - name: Run doc tests
+        if: runner.os == 'Linux'
+        run: cargo test --no-fail-fast --doc --all-features --workspace
+
+      - name: Stop Docker containers
+        if: always() && runner.os == 'Linux'
+        run: make docker-down
+
   # Checks each crate individually to catch missing feature declarations that
   # are otherwise masked by Cargo's feature unification across the workspace.
   check_standalone:
@@ -192,72 +224,6 @@ jobs:
             echo "Checking $pkg..."
             cargo check -p "$pkg" --all-targets || exit 1
           done
-
-  tests:
-    needs: lint
-    runs-on: ubuntu-latest
-    env:
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_DEV_DEBUG: "0"
-    strategy:
-      max-parallel: 15
-      matrix:
-        test-suite:
-          - { name: "default", args: "--all-targets --all-features --workspace" }
-          - { name: "doc", args: "--doc --all-features --workspace" }
-    name: Tests (${{ matrix.test-suite.name }})
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Setup Rust toolchain
-        uses: ./.github/actions/setup-builder
-
-      # Image + build-definition files in the key so changed steps or a new
-      # runner image rotate the cache; see the build job for the rationale.
-      # The test-suite name stays in front so the default and doc suites keep
-      # separate cache lineages.
-      - name: Get runner image id
-        id: image
-        shell: bash
-        run: echo "id=${ImageOS:?}" >> "$GITHUB_OUTPUT"
-
-      - name: Cache Rust artifacts
-        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          key: ${{ matrix.test-suite.name }}-${{ steps.image.outputs.id }}-${{ hashFiles('.github/workflows/ci.yml', 'Makefile', 'Cargo.toml') }}
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          add-rust-environment-hash-key: 'false'
-
-      - name: Install cargo-nextest
-        if: matrix.test-suite.name == 'default'
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
-        with:
-          tool: cargo-nextest
-
-      - name: Start Docker containers
-        if: matrix.test-suite.name == 'default'
-        run: make docker-up
-
-      - name: Run tests
-        shell: bash
-        env:
-          # HuggingFace Hub integration tests self-skip when these are unset
-          # (e.g. PRs from forks); see crates/storage/opendal/tests/file_io_hf_test.rs
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_BUCKET: ${{ secrets.HF_BUCKET }}
-          HF_DATASET: ${{ secrets.HF_DATASET }}
-        run: |
-          if [ "${{ matrix.test-suite.name }}" = "default" ]; then
-            cargo nextest run ${{ matrix.test-suite.args }}
-          else
-            cargo test --no-fail-fast ${{ matrix.test-suite.args }}
-          fi
-
-      - name: Stop Docker containers
-        if: always() && matrix.test-suite.name == 'default'
-        run: make docker-down
 
   msrv:
     name: Verify MSRV
