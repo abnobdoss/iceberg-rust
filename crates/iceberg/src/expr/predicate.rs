@@ -459,11 +459,17 @@ impl Bind for Predicate {
             }
             Predicate::Set(expr) => {
                 let bound_expr = expr.bind(schema, case_sensitive)?;
-                let bound_literals = bound_expr
+                let mut bound_literals = bound_expr
                     .literals
                     .into_iter()
                     .map(|l| l.to(&bound_expr.term.field().field_type))
                     .collect::<Result<FnvHashSet<Datum>>>()?;
+                bound_literals.retain(|literal| {
+                    !matches!(
+                        literal.literal(),
+                        PrimitiveLiteral::AboveMax | PrimitiveLiteral::BelowMin
+                    )
+                });
 
                 match &bound_expr.op {
                     &PredicateOperator::In => {
@@ -1701,5 +1707,151 @@ mod tests {
             &format!("{result}"),
             "((bar >= 10) AND (foo IS NOT NULL)) AND (bar >= 5)"
         );
+    }
+
+    fn schema_with_type(field_type: PrimitiveType) -> SchemaRef {
+        Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::optional(1, "c", Type::Primitive(field_type)).into(),
+                ])
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn assert_datum_binds(field_type: PrimitiveType, datum: Datum) {
+        let schema = schema_with_type(field_type);
+        let pred = Reference::new("c").equal_to(datum);
+
+        assert!(pred.bind(schema, true).is_ok());
+    }
+
+    fn assert_datum_bind_fails(field_type: PrimitiveType, datum: Datum) {
+        let schema = schema_with_type(field_type);
+        let pred = Reference::new("c").equal_to(datum);
+
+        assert!(pred.bind(schema, true).is_err());
+    }
+
+    #[test]
+    fn test_bind_datum_bool() {
+        assert_datum_binds(PrimitiveType::Boolean, Datum::bool(true));
+        assert_datum_binds(PrimitiveType::Boolean, Datum::bool(false));
+    }
+
+    #[test]
+    fn test_bind_datum_bool_wrong_type_fails() {
+        assert_datum_bind_fails(PrimitiveType::Boolean, Datum::int(1));
+    }
+
+    #[test]
+    fn test_bind_datum_date() {
+        assert_datum_binds(
+            PrimitiveType::Date,
+            Datum::date_from_str("2026-05-24").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_time() {
+        assert_datum_binds(
+            PrimitiveType::Time,
+            Datum::time_from_str("10:30:00.123456").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_timestamp_naive() {
+        assert_datum_binds(
+            PrimitiveType::Timestamp,
+            Datum::timestamp_from_str("2026-05-24T10:30:00.123456").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_timestamptz() {
+        assert_datum_binds(
+            PrimitiveType::Timestamptz,
+            Datum::timestamptz_from_str("2026-05-24T10:30:00+00:00").unwrap(),
+        );
+        assert_datum_binds(
+            PrimitiveType::Timestamptz,
+            Datum::timestamptz_from_str("2026-05-24T10:30:00-05:00").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_decimal() {
+        assert_datum_binds(
+            PrimitiveType::Decimal {
+                precision: 38,
+                scale: 2,
+            },
+            Datum::decimal_from_str("3.14").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_decimal_literal_against_narrower_precision_fails() {
+        assert_datum_bind_fails(
+            PrimitiveType::Decimal {
+                precision: 9,
+                scale: 2,
+            },
+            Datum::decimal_from_str("3.14").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_double_literal_against_float_column_fails() {
+        assert_datum_bind_fails(PrimitiveType::Float, Datum::double(1.5));
+    }
+
+    #[test]
+    fn test_bind_int_overflow_binary_simplifies() {
+        let schema = schema_with_type(PrimitiveType::Int);
+
+        let above = Reference::new("c")
+            .equal_to(Datum::long(i64::MAX))
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(above, BoundPredicate::AlwaysFalse));
+
+        let below = Reference::new("c")
+            .not_equal_to(Datum::long(i64::MIN))
+            .bind(schema, true)
+            .unwrap();
+        assert!(matches!(below, BoundPredicate::AlwaysTrue));
+    }
+
+    #[test]
+    fn test_bind_int_overflow_set_simplifies() {
+        let schema = schema_with_type(PrimitiveType::Int);
+
+        let in_above = Reference::new("c")
+            .is_in([Datum::long(i64::MAX)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(in_above, BoundPredicate::AlwaysFalse));
+
+        let not_in_above = Reference::new("c")
+            .is_not_in([Datum::long(i64::MAX)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert!(matches!(not_in_above, BoundPredicate::AlwaysTrue));
+
+        let in_mixed = Reference::new("c")
+            .is_in([Datum::long(i64::MAX), Datum::long(5)])
+            .bind(schema.clone(), true)
+            .unwrap();
+        assert_eq!(&format!("{in_mixed}"), "c = 5");
+
+        let not_in_mixed = Reference::new("c")
+            .is_not_in([Datum::long(i64::MIN), Datum::long(5)])
+            .bind(schema, true)
+            .unwrap();
+        assert_eq!(&format!("{not_in_mixed}"), "c != 5");
     }
 }
