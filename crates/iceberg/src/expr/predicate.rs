@@ -1702,4 +1702,104 @@ mod tests {
             "((bar >= 10) AND (foo IS NOT NULL)) AND (bar >= 5)"
         );
     }
+
+    fn schema_with_type(field_type: PrimitiveType) -> SchemaRef {
+        Arc::new(
+            Schema::builder()
+                .with_schema_id(1)
+                .with_fields(vec![
+                    NestedField::optional(1, "c", Type::Primitive(field_type)).into(),
+                ])
+                .build()
+                .unwrap(),
+        )
+    }
+
+    fn assert_datum_binds(field_type: PrimitiveType, datum: Datum) {
+        let schema = schema_with_type(field_type);
+        let pred = Reference::new("c").equal_to(datum);
+
+        assert!(pred.bind(schema, true).is_ok());
+    }
+
+    fn assert_datum_bind_fails(field_type: PrimitiveType, datum: Datum) {
+        let schema = schema_with_type(field_type);
+        let pred = Reference::new("c").equal_to(datum);
+
+        assert!(pred.bind(schema, true).is_err());
+    }
+
+    #[test]
+    fn test_bind_datum_bool() {
+        assert_datum_binds(PrimitiveType::Boolean, Datum::bool(true));
+        assert_datum_binds(PrimitiveType::Boolean, Datum::bool(false));
+    }
+
+    #[test]
+    fn test_bind_datum_bool_wrong_type_fails() {
+        assert_datum_bind_fails(PrimitiveType::Boolean, Datum::int(1));
+    }
+
+    #[test]
+    fn test_bind_datum_date() {
+        assert_datum_binds(
+            PrimitiveType::Date,
+            Datum::date_from_str("2026-05-24").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_time() {
+        assert_datum_binds(
+            PrimitiveType::Time,
+            Datum::time_from_str("10:30:00.123456").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_timestamp_naive() {
+        assert_datum_binds(
+            PrimitiveType::Timestamp,
+            Datum::timestamp_from_str("2026-05-24T10:30:00.123456").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_timestamptz() {
+        assert_datum_binds(
+            PrimitiveType::Timestamptz,
+            Datum::timestamptz_from_str("2026-05-24T10:30:00+00:00").unwrap(),
+        );
+        assert_datum_binds(
+            PrimitiveType::Timestamptz,
+            Datum::timestamptz_from_str("2026-05-24T10:30:00-05:00").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_datum_decimal() {
+        assert_datum_binds(
+            PrimitiveType::Decimal {
+                precision: 38,
+                scale: 2,
+            },
+            Datum::decimal_from_str("3.14").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_decimal_literal_against_narrower_precision_fails() {
+        assert_datum_bind_fails(
+            PrimitiveType::Decimal {
+                precision: 9,
+                scale: 2,
+            },
+            Datum::decimal_from_str("3.14").unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_bind_double_literal_against_float_column_fails() {
+        assert_datum_bind_fails(PrimitiveType::Float, Datum::double(1.5));
+    }
 }
